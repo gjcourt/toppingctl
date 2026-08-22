@@ -1,0 +1,15 @@
+{
+  "bands": [
+    {"type":"LS","freq":200,"gain":6.0,"q":0.707,"on":true},
+    {"type":"HS","freq":3413,"gain":5.3,"q":0.707,"on":true},
+    {"type":"PK","freq":632,"gain":0,"q":0.707,"on":false},
+    {"type":"PK","freq":632,"gain":0,"q":0.707,"on":false},
+    {"type":"PK","freq":632,"gain":0,"q":0.707,"on":false},
+    {"type":"PK","freq":632,"gain":0,"q":0.707,"on":false},
+    {"type":"PK","freq":632,"gain":0,"q":0.707,"on":false},
+    {"type":"PK","freq":632,"gain":0,"q":0.707,"on":false},
+    {"type":"PK","freq":632,"gain":0,"q":0.707,"on":false},
+    {"type":"PK","freq":632,"gain":0,"q":0.707,"on":false},
+    {"type":"PK","freq":632,"gain":0,"q":0.707,"on":false}
+  ]
+}

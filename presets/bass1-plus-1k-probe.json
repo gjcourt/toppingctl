@@ -1,0 +1,16 @@
+{
+  "_comment": "Bass 1 baseline + an obvious 1 kHz notch. Band 3 is the probe: a -12 dB cut at Q 2.0 is unmistakable on vocals or pink noise, so it doubles as an audible confirmation that PEQ writes reach the DSP.",
+  "bands": [
+    {"type":"LS","freq":200,"gain":6.0,"q":0.707,"on":true},
+    {"type":"HS","freq":3413,"gain":5.3,"q":0.707,"on":true},
+    {"type":"PK","freq":1000,"gain":-12.0,"q":2.0,"on":true},
+    {"type":"PK","freq":632,"gain":0,"q":0.707,"on":false},
+    {"type":"PK","freq":632,"gain":0,"q":0.707,"on":false},
+    {"type":"PK","freq":632,"gain":0,"q":0.707,"on":false},
+    {"type":"PK","freq":632,"gain":0,"q":0.707,"on":false},
+    {"type":"PK","freq":632,"gain":0,"q":0.707,"on":false},
+    {"type":"PK","freq":632,"gain":0,"q":0.707,"on":false},
+    {"type":"PK","freq":632,"gain":0,"q":0.707,"on":false},
+    {"type":"PK","freq":632,"gain":0,"q":0.707,"on":false}
+  ]
+}
