@@ -66,13 +66,13 @@ macOS may require granting your terminal **Input Monitoring**
 ## Use
 
 ```bash
-./dx5.py apply e3.txt          # write a PEQ preset (AutoEQ .txt or .json)
-./dx5.py flat                  # disable all bands
-./dx5.py vol -30               # set volume in dB
-./dx5.py gain on               # headphone gain
-./dx5.py power off             # sleep
-./dx5.py show                  # last-written state
-./dx5.py dump preset.json      # export state as JSON
+./toppingctl.py apply e3.txt          # write a PEQ preset (AutoEQ .txt or .json)
+./toppingctl.py flat                  # disable all bands
+./toppingctl.py vol -30               # set volume in dB
+./toppingctl.py gain on               # headphone gain
+./toppingctl.py power off             # sleep
+./toppingctl.py show                  # last-written state
+./toppingctl.py dump preset.json      # export state as JSON
 ```
 
 `--dry-run` prints the frames without sending them. Use it first.
@@ -91,21 +91,35 @@ Only **PK**, **LS** and **HS** are supported — the three filter types confirme
 on this device. Any other type is **reported, not silently dropped**, because a
 missing filter yields a wrong curve that still sounds plausible.
 
-The device has **11 bands**; presets with more are rejected rather than
-truncated.
+The device has **11 band registers** (`0x91`–`0x9b`) and this tool writes all of
+them, matching the vendor app's own commit traffic. The vendor UI, however,
+reports capacity as "BANDS n / 10", so **the 11th band is unverified** — either
+`0x9b` is not a usable band or the app caps below the hardware limit. Keep
+presets to **10 bands** until someone confirms band 11 is audible. Presets with
+more than 11 are rejected rather than truncated.
 
 ## Two things to know
 
 **The device cannot be read.** Read requests return an echo, not state. So
-`show` reports what *this tool* last wrote, cached in `~/.dx5ctl/state.json`.
+`show` reports what *this tool* last wrote, cached in `~/.toppingctl/state.json`.
 Changes made from the front panel, the remote, or the vendor app are invisible
 here and will make the cache stale. This does not affect correctness of
 `apply`, which always writes all 11 bands.
 
-**Preamp is not applied.** AutoEQ presets specify a preamp to prevent clipping
-from positive gains. The preamp register (`0x9c`) is suspected but unconfirmed,
-so this tool refuses to write it and warns instead. Lower the volume manually by
-roughly the preamp figure.
+**Preamp is applied when the preset declares one**, and only then. AutoEQ
+`.txt` files carry a `Preamp:` line and JSON presets a `preamp_db` field;
+`apply` writes it to `0x9c` before the bands. For those presets, do **not** also
+lower the volume by hand — you would be attenuated twice.
+
+**A preset with no preamp line writes none**, and the device keeps whatever
+preamp was set last, which this tool cannot read back. `presets/bass1.json` is
+exactly this case: it boosts `+6.0 dB` and declares no preamp. `apply` now warns
+when a preset boosts without one — set it yourself first with
+`./toppingctl.py preamp <dB>` (range `-40..+10`).
+
+Register `0x9c` is confirmed: linear gain in Q25 fixed point,
+`dB = 20·log10(value / 2^25)`, derived from the vendor app's own `-3.0 dB` value
+and verified by round trip at `-6.0 dB`.
 
 ## Safety
 
