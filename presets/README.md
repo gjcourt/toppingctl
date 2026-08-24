@@ -1,6 +1,6 @@
 # Presets
 
-Apply any of these with `../dx5.py apply <file>`. Add `--dry-run` first to see
+Apply any of these with `../toppingctl.py apply <file>`. Add `--dry-run` first to see
 the frames without sending them.
 
 | File | What it is |
@@ -13,9 +13,9 @@ the frames without sending them.
 ## A/B-ing the two E3 corrections
 
 ```bash
-../dx5.py apply presets/e3-oratory-harman-8k.txt
-../dx5.py apply presets/e3-kuulokenurkka-autoeq.txt
-../dx5.py flat                                     # no EQ, for reference
+../toppingctl.py apply presets/e3-oratory-harman-8k.txt
+../toppingctl.py apply presets/e3-kuulokenurkka-autoeq.txt
+../toppingctl.py flat                                     # no EQ, for reference
 ```
 
 They come from **different measurements of the same headphone**, so any audible
