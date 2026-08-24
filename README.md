@@ -106,14 +106,20 @@ Changes made from the front panel, the remote, or the vendor app are invisible
 here and will make the cache stale. This does not affect correctness of
 `apply`, which always writes all 11 bands.
 
-**Preamp is applied automatically.** AutoEQ presets specify a preamp to prevent
-clipping from positive gains, and `apply` writes it before the bands — so do
-**not** also lower the volume by hand, or you will be attenuated twice.
+**Preamp is applied when the preset declares one**, and only then. AutoEQ
+`.txt` files carry a `Preamp:` line and JSON presets a `preamp_db` field;
+`apply` writes it to `0x9c` before the bands. For those presets, do **not** also
+lower the volume by hand — you would be attenuated twice.
+
+**A preset with no preamp line writes none**, and the device keeps whatever
+preamp was set last, which this tool cannot read back. `presets/bass1.json` is
+exactly this case: it boosts `+6.0 dB` and declares no preamp. `apply` now warns
+when a preset boosts without one — set it yourself first with
+`./toppingctl.py preamp <dB>` (range `-40..+10`).
 
 Register `0x9c` is confirmed: linear gain in Q25 fixed point,
-`dB = 20·log10(value / 2^25)`, verified by round trip against the vendor app's
-own `-3.0 dB` value. Set it on its own with `toppingctl preamp <dB>` (range
-`-40..+10`).
+`dB = 20·log10(value / 2^25)`, derived from the vendor app's own `-3.0 dB` value
+and verified by round trip at `-6.0 dB`.
 
 ## Safety
 

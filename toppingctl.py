@@ -343,6 +343,13 @@ def cmd_apply(args):
 
     if preamp is not None:
         print(f"\n  preamp {preamp:+.1f} dB (raw 0x{db_to_q25(preamp):08X})")
+    else:
+        boost = max([b["gain"] for b in bands if b["on"]] or [0.0])
+        if boost > 0:
+            print(f"\n  WARNING: this preset boosts up to {boost:+.1f} dB and declares no preamp.")
+            print("  Nothing is written to 0x9c, so the device keeps whatever preamp was set")
+            print("  last -- which this tool cannot read back. Positive gain with no preamp")
+            print(f"  can clip. Set one first:  ./toppingctl.py preamp {-abs(boost):.1f}")
 
     dev = Device(args.dry_run, getattr(args, "device", None))
     if preamp is not None:
