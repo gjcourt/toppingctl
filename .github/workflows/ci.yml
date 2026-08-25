@@ -35,3 +35,6 @@ jobs:
           ./toppingctl.py --dry-run flat
           ./toppingctl.py --dry-run apply presets/bass1.json
           for f in presets/*.txt; do ./toppingctl.py --dry-run apply "$f"; done
+          ./smoke.py --dry-run
+          ./probe.py 0x04 0 --dry-run
+          ./setctl.py --list

@@ -21,7 +21,7 @@ import argparse
 import sys
 import time
 
-from toppingctl import DEVICES, frame
+from toppingctl import frame, open_checked
 from vendor_commands import COMMANDS, PROTOCOL
 
 READ_NACK = 0x10
@@ -67,9 +67,7 @@ def main():
     ap.add_argument("--device", default="dx5ii")
     a = ap.parse_args()
 
-    spec = DEVICES[a.device]
-    import hid
-    h = hid.Device(spec["vid"], spec["pid"])
+    h = open_checked(a.device)
 
     if a.read:
         cmd = resolve(a.read)

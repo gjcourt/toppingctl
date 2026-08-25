@@ -42,14 +42,15 @@ ALIASES = {
     "muted": ("Mute", "unchecked"),
     "highGain": ("HeadphoneGain", "unchecked"),
     "remoteEnabled": ("Remote", "unchecked"),
-    "autoScreenTimeout": ("DimScreenTimeout", "unchecked"),
+    "autoScreenTimeout": ("DimScreenTimeout", "register"),
     "inputOptionMask": ("InputOption", "unchecked"),
     "outputOptionMask": ("OutputOption", "unchecked"),
     "crossfeedConvolutionOptionMask": ("CrossfeedConvolutionOption", "unchecked"),
     "crossfeedSimpleOptionMask": ("CrossfeedSimpleOption", "unchecked"),
 }
 # Never settable from here.
-NEVER = {"powered", "inputOptionMask", "outputOptionMask", "sampleRate"}
+NEVER = {"powered", "sampleRate", "inputOptionMask", "outputOptionMask",
+         "crossfeedConvolutionOptionMask", "crossfeedSimpleOptionMask"}
 
 _BY_NAME = {n.lower(): c for c, n in COMMANDS.items()}
 
@@ -104,6 +105,11 @@ def main():
             f"register whose effect cannot be read back."
         )
     before = state[field]
+    if before == raw:
+        sys.exit(
+            f"{field} is already {a.value} -- writing it would prove nothing, "
+            f"since the read-back would match whether or not the write landed."
+        )
     print(f"  {field} = {devstate.label(field, before)}  ->  {a.value}")
     note = "" if conf == "vendor" else f"  [mapping inferred, confidence: {conf}]"
     print(f"  via {vendor_name} (0x{cmd:04x}){note}")
@@ -116,7 +122,7 @@ def main():
         return
 
     after = devstate.by_name().get(field)
-    if after == raw:
+    if after == (raw & 0xFFFFFFFF):
         print(f"  VERIFIED: device reports {devstate.label(field, after)}")
     else:
         print(f"  FAILED: device reports {devstate.label(field, after)} "
