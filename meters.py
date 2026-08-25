@@ -13,7 +13,7 @@ import argparse
 import sys
 import time
 
-from toppingctl import DEVICES
+from toppingctl import DEVICES, frame
 
 VU, FFT = 0x7130, 0x7131
 
@@ -50,12 +50,21 @@ def main():
     import hid
     spec = DEVICES[a.device]
     h = hid.Device(spec["vid"], spec["pid"])
+    # The device stops streaming without a heartbeat. The vendor app sends
+    # Heartbeat (0x7134) every 5 s and re-syncs after 15 s of silence -- and
+    # every write this tool makes ends in a "commit", which is the same
+    # register, which is why the stream looked unsolicited at first.
+    HEARTBEAT = frame(0x71, 0x34, 1)
+    next_beat = 0.0
     vu_buf, fft_buf = {}, {}
     counts = {VU: 0, FFT: 0, "other": 0}
     last = 0.0
     t0 = time.time()
     try:
         while time.time() - t0 < a.secs:
+            if time.time() >= next_beat:
+                h.write(HEARTBEAT)
+                next_beat = time.time() + 2.0
             try:
                 b = h.read(64, timeout=200)
             except Exception:
