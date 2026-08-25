@@ -1,7 +1,14 @@
 # HiFiMan Sundara (POST-2020 EARPADS) - over-ear planar
 # target: Harman OE 2018 | source: AutoEQ / oratory1990 over-ear
-# NOTE: pad-revision specific. Pre-2020 pads and Dekoni sheepskin have their own
-# upstream presets with different values. Confirm which pads are fitted.
+# NOTE: pad-revision specific, and the revisions differ a lot: post-2020 is
+# -6.7 dB preamp with a +8.9 dB low shelf, while pre-2020 and Dekoni sheepskin
+# are about -5.2 dB with a +5.3 dB shelf. This unit dates from 2021, which is
+# after the pad change, so post-2020 is the right file.
+#
+# If the bass sounds bloated or boomy with this loaded, that is the symptom of
+# post-2020 correction on pre-2020 pads -- roughly 3.6 dB too much shelf. Try
+# the pre-2020 preset instead. Pads are a wear item; a replacement set may not
+# match what the headphone shipped with.
 # NOTE: the -6.7 dB preamp is computed over 20 Hz - 20 kHz. The 105 Hz low
 # shelf keeps rising below that and reaches +8.9 dB at DC, so infrasonic
 # content can still clip. Use -9.0 dB if that matters to your source material.

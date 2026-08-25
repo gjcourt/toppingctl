@@ -41,9 +41,14 @@ is the first thing to disable.
 
 ### Two hardware caveats
 
-**Check which pads are on the Sundara.** Upstream publishes three corrections -- pre-2020 stock,
-post-2020 stock and Dekoni sheepskin -- and they differ substantially (post-2020 is -6.7 dB with
-a +8.9 dB shelf; the other two are -5.2 dB with roughly +5.3 dB). The file here is post-2020.
+**The Sundara file is the post-2020 pad revision.** Upstream publishes three corrections --
+pre-2020 stock, post-2020 stock and Dekoni sheepskin -- differing substantially: post-2020 is
+-6.7 dB with a +8.9 dB shelf, the other two about -5.2 dB with a +5.3 dB shelf. This unit dates
+from 2021, after the pad change.
+
+The audible tell if that is wrong: bloated, boomy bass means roughly 3.6 dB too much low shelf,
+i.e. the post-2020 correction on pre-2020 pads. Pads are also a wear item, so a replacement set
+may not match what the headphone shipped with.
 
 **The Sundara boost is large.** +8.9 dB low shelf, and the preamp is computed over 20 Hz-20 kHz;
 the shelf keeps rising below that. EQ corrects frequency response, not distortion, and planars
