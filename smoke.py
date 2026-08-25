@@ -27,9 +27,10 @@ sys.path.insert(0, __import__("os").path.dirname(__import__("os").path.abspath(_
 from toppingctl import (
     BAND_COUNT,
     DEFAULT_BAND,
-    POWER_FRAMES,
     REG_CTRL,
     SUB_GAIN,
+    SUB_POWER,
+    SUB_POWER_B4,
     SUB_VOLUME,
     Device,
     band_frames,
@@ -92,7 +93,7 @@ def main():
 
     try:
         step(1, "WAKE", "device powers on / display lights")
-        dev.send(POWER_FRAMES[True], "power on")
+        dev.send(frame(REG_CTRL, SUB_POWER, 1, b4=SUB_POWER_B4, crc=True), "power on")
         time.sleep(pause)
 
         step(2, f"VOLUME -> {SAFE_VOL:+.1f} dB", f"display reads {SAFE_VOL:+.1f}")
@@ -131,7 +132,7 @@ def main():
 
         if args.sleep:
             step(10, "SLEEP", "device powers down / display off")
-            dev.send(POWER_FRAMES[False], "power off")
+            dev.send(frame(REG_CTRL, SUB_POWER, 0, b4=SUB_POWER_B4, crc=True), "power off")
             time.sleep(pause)
             print("\n    (device is asleep — wake with: ./toppingctl.py power on)")
     finally:

@@ -34,3 +34,6 @@ jobs:
           ./toppingctl.py --dry-run power off
           ./toppingctl.py --dry-run flat
           ./toppingctl.py --dry-run apply presets/bass1.json
+          ./smoke.py --dry-run
+          ./probe.py 0x04 0 --dry-run
+          ./setctl.py --list
