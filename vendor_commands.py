@@ -152,14 +152,58 @@ FIELD_ENUM = {
     "bluetoothMode": "bluetooth_mode", "powerTrigger": "power_trigger",
     "classicVuLevel": "classic_vu_level", "vuBarMode": "vu_bar_mode",
     "multifunctionKey": "multifunction_key",
-    # INFERRED, not vendor-sourced: the bundle has no remote-key table, and
-    # these two plausibly decode through the multifunction-key one. Treat with
-    # the suspicion this file exists to encourage.
+    # Vendor-sourced after all: setDx5iiRemoteAKey and setDx5iiRemoteBKey both
+    # index DX5II_MULTIFUNCTION_KEY_ID_TO_DEVICE, and the inbound decoder routes
+    # remoteAKeyFunction, remoteBKeyFunction, multifunctionKey and
+    # multifunctionDoubleKey through one helper. One 16-entry table, four
+    # bindings. This was an inference that happened to be right; it is no longer
+    # an inference.
     "remoteAKeyFunction": "multifunction_key",
     "remoteBKeyFunction": "multifunction_key",
+    "multifunctionDoubleKey": "multifunction_key",
     "volumeMemory": "memory_mode",
     "peqMemory": "memory_mode",
     "crossfeedMemory": "memory_mode",
     "dimScreenType": "dim_screen_type", "triggerOut": "trigger_out",
     "autoScreenTimeout": "auto_screen_timeout",
 }
+
+# Sample-rate codes (settings record 27). 0 = no signal. Values >= 8000 are
+# passed through as literal Hz. Format is derived, not transmitted:
+# > 768000 implies DSD.
+SAMPLE_RATES = {
+    0: None, 1: 44100, 2: 48000, 3: 88200, 4: 96000, 5: 176400, 6: 192000,
+    7: 352800, 8: 384000, 9: 705600, 10: 768000, 11: 2822400, 12: 5644800,
+    13: 11289600, 14: 22579200, 15: 45158400, 16: 49152000,
+}
+
+
+def decode_balance(raw):
+    """Record 17. Signed int32, tenths of a dB, +/-9.5 dB, 0.5 dB steps."""
+    v = raw - (1 << 32) if raw >> 31 else raw
+    if v == 0:
+        return "center"
+    return f"{'L' if v < 0 else 'R'} {abs(v) / 10:.1f} dB"
+
+
+def decode_sample_rate(raw):
+    hz = SAMPLE_RATES.get(raw, raw if raw >= 8000 else None)
+    if not hz:
+        return "no signal"
+    return f"{'DSD' if hz > 768000 else 'PCM'} {hz:,} Hz"
+
+
+def decode_version(raw):
+    """Records 45-47. Low 12 bits, three BCD nibbles, rendered M.mm.
+
+    The vendor parser never reads these records, so the ENCODING is certain
+    (it is their own firmware-version decoder) but WHICH record is firmware
+    versus hardware is inferred from a single device.
+    """
+    if raw in (0, 0xFFFFFFFF):
+        return None
+    lo = raw & 0xFFF
+    a, b, c = (lo >> 8) & 0xF, (lo >> 4) & 0xF, lo & 0xF
+    if a > 9 or b > 9 or c > 9 or (a == 0 and b == 0 and c == 0):
+        return None
+    return f"{a}.{b}{c}"
