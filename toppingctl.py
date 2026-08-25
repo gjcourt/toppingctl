@@ -77,10 +77,11 @@ PEQ_FIRST, PEQ_LAST = 0x91, 0x9B      # 11 band registers exist ...
 REG_PREAMP = 0x9C                     # preamp: subs 01/03 = value L/R, 02/04 = enable
 PREAMP_SCALE = 1 << 25                # linear gain in Q25 fixed point
 REG_COUNT = PEQ_LAST - PEQ_FIRST + 1  # ... and all 11 are written
-# ... but only 10 of them DO anything. Topping documents this device as a
-# 10-band PEQ and the vendor UI agrees; only the app's commit traffic ever
-# suggested 11, and inferring capability from captured traffic over documented
-# spec is what put 11 here in the first place. Tested 2026-08-24 on a DX5 II: a
+# ... but only 10 of them DO anything. Topping documents 10; the vendor app
+# nonetheless writes all eleven, which made an undocumented eleventh band a
+# reasonable hypothesis -- hardware does sometimes exceed its datasheet. The
+# error was shipping that hypothesis as the default before testing it, so every
+# preset depended on an unverified guess. Tested 2026-08-24 on a DX5 II: a
 # PK 1 kHz -15 dB Q 0.7 cut written to band 10 (0x9a) was plainly audible, the
 # identical filter written to band 11 (0x9b) was inaudible, and re-applying
 # band 10 brought the cut back -- so the silence was the register, not the rig.
