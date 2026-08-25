@@ -56,6 +56,12 @@ DEVICES = {
         "vid": 0x152A,
         "pid": 0x8750,
         "bands": 10,
+        # PID 0x8750 is NOT unique: the DX1 II and E50 II ship the same one, and
+        # their register maps collide across 0x7101-0x7131 with DIFFERENT
+        # meanings -- 0x7113 is HomePage here and BluetoothMode on an E50 II.
+        # So the PID cannot identify the model and the USB product string is
+        # what actually distinguishes them, which is what the vendor app uses.
+        "product_match": ("DX5II", "DX52", "DX5"),
         "status": "confirmed",
     },
     # D90 III Discrete: same vendor, same web app, so the protocol is very
@@ -66,6 +72,10 @@ DEVICES = {
 THESYCON_VID = 0x152A
 
 # --- protocol constants (see spec) ------------------------------------------
+
+# The DAC presents multiple HID interfaces; the control protocol lives on
+# usage page 1. Writes to the others fail at the OS layer.
+PROTOCOL_USAGE_PAGE = 1
 
 REG_CTRL = 0x71           # device control
 SUB_POWER = 0x01
@@ -110,15 +120,12 @@ FILTER_NAMES = {1: "PK", 4: "LS", 5: "HS"}
 # the factory default centre, not a meaningful setting.
 DEFAULT_BAND = {"type": "PK", "freq": 632, "gain": 0.0, "q": 0.707, "on": False}
 
-# Power is the one register requiring a real checksum, and it does NOT answer
-# the checksum oracle. These two frames are replayed verbatim from capture;
-# since the register is binary, that is sufficient.
-POWER_FRAMES = {
-    False: bytes([0x22, 0x33, 0x20, 0x01, 0x00, 0x71, 0x01,
-                  0x00, 0x00, 0x00, 0x00, 0xDC, 0x65, 0x66, 0x77, 0x00]),
-    True: bytes([0x22, 0x33, 0x20, 0x01, 0x00, 0x71, 0x01,
-                 0x00, 0x00, 0x00, 0x01, 0x1C, 0xA4, 0x66, 0x77, 0x00]),
-}
+# Power is the one register the device checksums. It used to be two frames
+# replayed verbatim from capture because the algorithm was unknown; it is
+# CRC-16/MODBUS, so they are computed now. b4 is 0 here, not the usual 1, and
+# that byte is inside the CRC -- which is why the replayed frames worked and a
+# naive rebuild would not have.
+SUB_POWER_B4 = 0x00
 
 STATE_DIR = os.path.expanduser("~/.toppingctl")
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
@@ -153,16 +160,33 @@ def q25_to_db(v):
 
 # --- frame construction -----------------------------------------------------
 
-def frame(reg, sub, value, opcode=0x20, b4=0x01):
-    """22 33 <op> 01 <b4> <reg> <sub> <int32 BE> 00 00 66 77 00
+def crc16_modbus(data):
+    """Reflected CRC-16, polynomial 0xA001, init 0xFFFF, no final XOR."""
+    n = 0xFFFF
+    for b in data:
+        n ^= b
+        for _ in range(8):
+            n = ((n >> 1) ^ 0xA001) if n & 1 else (n >> 1)
+            n &= 0xFFFF
+    return n
 
-    Bytes 11-12 are a checksum the device fills in on its own frames. Writes are
-    accepted with 00 00 for every register except power (handled separately).
+
+def frame(reg, sub, value, opcode=0x20, b4=0x01, crc=False):
+    """22 33 <op> 01 <b4> <reg> <sub> <int32 BE> <ck ck> 66 77 00
+
+    Bytes 11-12 are a CRC-16/MODBUS over the nine bytes between the 22 33
+    header and the checksum itself, stored HIGH BYTE FIRST -- the reverse of
+    standard Modbus framing, which is why it resisted earlier attempts.
+
+    The device accepts 00 00 for every register except power, and the vendor app
+    likewise computes the CRC only for power, so crc defaults to False to match
+    the traffic rather than to be tidy.
     """
     v = int(value) & 0xFFFFFFFF
-    return bytes([0x22, 0x33, opcode, 0x01, b4, reg, sub,
-                  (v >> 24) & 0xFF, (v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF,
-                  0x00, 0x00, 0x66, 0x77, 0x00])
+    f = [0x22, 0x33, opcode, 0x01, b4, reg, sub,
+         (v >> 24) & 0xFF, (v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF]
+    c = crc16_modbus(f[2:11]) if crc else 0
+    return bytes(f + [(c >> 8) & 0xFF, c & 0xFF, 0x66, 0x77, 0x00])
 
 
 def band_frames(index, band):
@@ -212,6 +236,23 @@ def find_devices():
     return found
 
 
+def open_checked(dev_key="dx5ii"):
+    """Open the device with the model check applied.
+
+    Everything that talks to the hardware must come through here. The check
+    used to live only in Device.__init__, so devstate, meters and listen -- all
+    of which open their own handle -- drove whatever was on the VID/PID pair.
+    An E50 II would have been decoded through the DX5 II settings map and
+    reported as confident wrong values.
+    """
+    import hid
+    spec = DEVICES[dev_key]
+    probe = Device.__new__(Device)
+    probe.spec = spec
+    path = probe._check_model()
+    return hid.Device(path=path) if path else hid.Device(spec["vid"], spec["pid"])
+
+
 class Device:
     """A Topping DAC over USB HID.
 
@@ -227,8 +268,10 @@ class Device:
             sys.exit(f"unknown device {self.key!r}; known: {', '.join(DEVICES)}")
         self.spec = DEVICES[self.key]
         if not dry_run:
+            path = self._check_model()
             try:
-                self.h = hid.Device(self.spec["vid"], self.spec["pid"])
+                self.h = hid.Device(path=path) if path else \
+                    hid.Device(self.spec["vid"], self.spec["pid"])
             except Exception as e:
                 hint = ""
                 others = [f for f in find_devices() if not f["known"]]
@@ -240,6 +283,65 @@ class Device:
                          f"({self.spec['vid']:#06x}/{self.spec['pid']:#06x}): {e}\n"
                          f"is it plugged in? if this is a permissions error, grant "
                          f"your terminal Input Monitoring in System Settings.{hint}")
+
+    @staticmethod
+    def _normalise(name):
+        """Vendor's comparison: upper-case, Roman numeral to II, alnum only."""
+        if isinstance(name, bytes):
+            name = name.decode("utf-8", "replace")
+        return "".join(c for c in (name or "").upper().replace("\u2161", "II")
+                       if c.isalnum())
+
+    def _check_model(self):
+        """Refuse to drive a device whose product string is not this model.
+
+        Writing a DX5 II register map to an E50 II would not fail loudly -- the
+        registers exist on both and mean different things -- so this is checked
+        before anything is opened rather than discovered afterwards.
+        """
+        want = self.spec.get("product_match")
+        if not want:
+            return None
+        try:
+            entries = hid.enumerate(self.spec["vid"], self.spec["pid"])
+        except Exception as e:
+            sys.exit(f"cannot enumerate HID devices: {e}")
+        matched = [d for d in entries
+                   if any(self._normalise(d.get("product_string")).startswith(w)
+                          or w in self._normalise(d.get("product_string"))
+                          for w in want)]
+        # Opening by VID/PID when several devices share it would hand back an
+        # arbitrary one -- possibly the very E50 II this check exists to avoid.
+        # So return a matched entry's path and open THAT, not the pair.
+        #
+        # But one DAC exposes SEVERAL HID interfaces (this one presents two,
+        # usage pages 1 and 12, on the same serial), so a count of matches does
+        # not distinguish "two interfaces" from "two devices". Group by serial:
+        # more than one distinct serial is a real collision, more than one entry
+        # sharing a serial is just one device with several endpoints.
+        if matched:
+            # One DAC exposes several HID interfaces and only ONE speaks this
+            # protocol: usage_page 1 accepts writes, usage_page 12 rejects every
+            # one with IOHIDDeviceSetReport failed. Opening by VID/PID used to
+            # pick whichever hidapi happened to return first, which worked by
+            # luck. Choose deliberately.
+            matched.sort(key=lambda d: (d.get("usage_page") != PROTOCOL_USAGE_PAGE,
+                                        d.get("interface_number") or 0))
+            serials = {d.get("serial_number") for d in matched}
+            if len(serials) > 1:
+                sys.exit(
+                    f"{len(serials)} distinct devices match {self.spec['name']}; "
+                    f"unplug one -- this tool cannot tell which you meant."
+                )
+            return matched[0].get("path")
+        seen = [d.get("product_string") for d in entries]
+        sys.exit(
+            f"refusing to drive {self.spec['name']}: attached device on "
+            f"{self.spec['vid']:#06x}/{self.spec['pid']:#06x} reports "
+            f"{seen!r}, which is not {list(want)}.\n"
+            f"That PID is shared by the DX1 II and E50 II, whose registers "
+            f"collide with this map and mean different things."
+        )
 
     def send(self, f, label=""):
         if self.dry_run:
@@ -464,7 +566,8 @@ def cmd_gain(args):
 def cmd_power(args):
     on = args.state == "on"
     dev = Device(args.dry_run, getattr(args, "device", None))
-    dev.send(POWER_FRAMES[on], f"power {args.state}")
+    dev.send(frame(REG_CTRL, SUB_POWER, int(on), b4=SUB_POWER_B4, crc=True),
+             f"power {args.state}")
     dev.close()
     if not args.dry_run:
         print(f"power {args.state}")
