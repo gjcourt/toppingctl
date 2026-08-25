@@ -94,8 +94,14 @@ missing filter yields a wrong curve that still sounds plausible.
 The device has **10 usable bands**; presets with more are rejected rather than
 truncated.
 
-Eleven band registers exist (`0x91`–`0x9b`) but **`0x9b` does nothing**, which
-was an open question until it was tested on 2026-08-24. A `PK 1 kHz -15 dB
+Eleven band registers exist (`0x91`–`0x9b`) but **`0x9b` does nothing**. Topping
+documents this device as a 10-band PEQ and the vendor UI reports "BANDS n / 10";
+the only thing that ever suggested 11 was the vendor app writing all eleven
+registers on commit, and this tool inferred a capability from that traffic in
+preference to the documented specification. That was the mistake — captured
+traffic shows what software does, not what hardware supports.
+
+Confirmed on hardware 2026-08-24. A `PK 1 kHz -15 dB
 Q 0.7` cut written to band 10 (`0x9a`) was plainly audible; the identical
 filter written to band 11 (`0x9b`) was inaudible; re-applying band 10 brought
 the cut back, so the silence was the register and not the test rig. `0x9b`
