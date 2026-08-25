@@ -21,7 +21,7 @@ while time.time() - t0 < 3.0:
 h.close()
 
 name = b"".join(rec.get(i, 0).to_bytes(4, "big")[::-1] for i in range(1, 9))
-print(f"device      {name.split(b'\\x00')[0].decode('ascii', 'replace').strip()}")
+print(f"device      {name.split(b"\x00")[0].decode('ascii', 'replace').strip()}")
 print(f"records     {len(rec)}  (firmware >= 2.40 adds 48..51: "
       f"{'yes' if max(rec, default=0) >= 48 else 'no'})\n")
 for i in sorted(rec):

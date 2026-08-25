@@ -75,8 +75,9 @@ COMMANDS = {
     0x7141: 'CrossfeedOptionMask',
 }
 
-# Byte 2 of every frame. We only ever sent writeNack; readAck is where the
-# device's answer to a read arrives.
+# Byte 2 of every frame. Sending readNack is what makes the device answer.
+# Measured on a DX5 II: its replies are tagged writeNack (0x20) as well --
+# readAck appears in the vendor table but this device never emits it.
 PROTOCOL = {0x10: 'readNack', 0x11: 'readAck', 0x20: 'writeNack', 0x21: 'writeAck'}
 
 # GetSettings (0x710c) returns a numbered array of 32-bit records; byte 4 of
@@ -151,10 +152,14 @@ FIELD_ENUM = {
     "bluetoothMode": "bluetooth_mode", "powerTrigger": "power_trigger",
     "classicVuLevel": "classic_vu_level", "vuBarMode": "vu_bar_mode",
     "multifunctionKey": "multifunction_key",
+    # INFERRED, not vendor-sourced: the bundle has no remote-key table, and
+    # these two plausibly decode through the multifunction-key one. Treat with
+    # the suspicion this file exists to encourage.
     "remoteAKeyFunction": "multifunction_key",
     "remoteBKeyFunction": "multifunction_key",
-    "crossfeedConvolutionOptionMask": "crossfeed_convolution_option",
-    "crossfeedSimpleOptionMask": "crossfeed_simple_option",
+    "volumeMemory": "memory_mode",
+    "peqMemory": "memory_mode",
+    "crossfeedMemory": "memory_mode",
     "dimScreenType": "dim_screen_type", "triggerOut": "trigger_out",
     "autoScreenTimeout": "auto_screen_timeout",
 }

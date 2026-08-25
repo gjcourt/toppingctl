@@ -71,7 +71,11 @@ REG_CTRL = 0x71           # device control
 SUB_POWER = 0x01
 SUB_VOLUME = 0x02
 SUB_GAIN = 0x17
-SUB_COMMIT = 0x34
+# The vendor calls 0x34 Heartbeat, not Commit. It does bracket every
+# transaction, which is why it read like a commit -- but the name is theirs and
+# the mental model here may be wrong. Kept as SUB_COMMIT because that is what
+# this code has always meant by it; renaming is a separate change.
+SUB_COMMIT = 0x34  # vendor name: Heartbeat
 
 PEQ_FIRST, PEQ_LAST = 0x91, 0x9B      # 11 band registers exist ...
 REG_PREAMP = 0x9C                     # preamp: subs 01/03 = value L/R, 02/04 = enable

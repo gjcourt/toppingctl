@@ -3,8 +3,11 @@
 
 Until now this tool has been write-only: `show` reports what we last wrote,
 because nobody knew where the device's replies arrived. The vendor bundle
-answers that -- byte 2 of every frame is a protocolType, and while we have only
-ever sent writeNack (0x20), a reply to a read is tagged readAck (0x11).
+answers that -- byte 2 of every frame is a protocolType, and we had only ever
+sent writeNack (0x20). Sending readNack (0x10) is what makes the device answer.
+
+Note the DX5 II tags its *replies* writeNack (0x20) too; readAck (0x11) is in the
+vendor's constant table but this device never emits it. Measured, not assumed.
 
 Usage:
     ./listen.py                        # passive, 10s
@@ -72,6 +75,7 @@ def main():
         cmd = resolve(a.read)
         name = COMMANDS.get(cmd, "?")
         if name in NEVER:
+            h.close()
             sys.exit(f"refusing to address {name}: not worth the risk from a probe")
         reg, sub = cmd >> 8, cmd & 0xFF
         print(f"-> readNack  0x{cmd:04x}  {name}")
