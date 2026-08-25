@@ -4,8 +4,17 @@ Local control for **Topping DACs** over USB HID. No vendor app, no cloud
 account, no dependency on `toppingaudio.com` — which is unreachable from some US
 ISPs, which is why this exists.
 
-Protocol was reverse-engineered clean-room by observing the vendor web app drive
-the device over WebHID. Full spec:
+The protocol was originally reverse-engineered clean-room, by watching the
+vendor web app drive the device over WebHID. **That is no longer the whole
+story.** The command names, settings layout and enum tables in
+`vendor_commands.py` are read directly out of Topping's own web bundle, so this
+project is now derived from the vendor application rather than from observation
+alone — see the provenance note at the top of that file.
+
+The change was worth making: observation had produced four confident and wrong
+conclusions (an eleventh PEQ band that does nothing, two mislabelled crossfeed
+registers, and an output enum wrong in both count and order). Reading the source
+replaced guesses with the vendor's own values. Full spec:
 [`gjcourt/lab` → `01-audio-midi/_reference/topping-dx5ii-hid-protocol.md`](https://github.com/gjcourt/lab/blob/main/01-audio-midi/_reference/topping-dx5ii-hid-protocol.md)
 
 ## Which devices
@@ -116,11 +125,20 @@ vendor app is cleared rather than left underneath your preset.
 
 ## Two things to know
 
-**The device cannot be read.** Read requests return an echo, not state. So
-`show` reports what *this tool* last wrote, cached in `~/.toppingctl/state.json`.
-Changes made from the front panel, the remote, or the vendor app are invisible
-here and will make the cache stale. This does not affect correctness of
-`apply`, which always writes all 11 bands.
+**The device can be read** — `./readsettings.py` queries it and prints the real
+state, decoded. Send a `readNack` (protocol byte `0x10`) for `GetSettings`
+(`0x710c`) and the device replies with its whole configuration as a numbered
+array of 32-bit records.
+
+This was previously believed impossible. Reads *do* return state; the confusion
+was that the device streams all-zero input reports while idle, so anyone
+listening without asking a question concludes nothing arrives.
+
+`show` is still only a cache of what this tool last wrote. Prefer
+`readsettings.py`, which asks the device.
+
+> `./listen.py --read 0x7133` returns your USB serial number in plain ASCII.
+> Don't paste that output anywhere public.
 
 **Preamp is applied when the preset declares one**, and only then. AutoEQ
 `.txt` files carry a `Preamp:` line and JSON presets a `preamp_db` field;
