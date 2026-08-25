@@ -2,9 +2,12 @@
 # target: Harman OE 2018 | source: AutoEQ / oratory1990 over-ear
 # NOTE: pad-revision specific. Pre-2020 pads and Dekoni sheepskin have their own
 # upstream presets with different values. Confirm which pads are fitted.
+# NOTE: the -6.7 dB preamp is computed over 20 Hz - 20 kHz. The 105 Hz low
+# shelf keeps rising below that and reaches +8.9 dB at DC, so infrasonic
+# content can still clip. Use -9.0 dB if that matters to your source material.
 # NOTE: +8.9 dB low shelf is a large boost. Planars rise in bass THD at high SPL
 # and EQ cannot fix distortion - keep listening levels moderate with this loaded.
-Preamp: -6.6 dB
+Preamp: -6.7 dB
 Filter 1: ON LSC Fc 105 Hz Gain 8.9 dB Q 0.70
 Filter 2: ON PK Fc 56 Hz Gain -4.5 dB Q 0.40
 Filter 3: ON PK Fc 971 Hz Gain -1.8 dB Q 1.62

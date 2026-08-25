@@ -1,6 +1,6 @@
 # Moondrop x Crinacle Blessing 2: Dusk - IEM
 # target: Harman IE 2019v2 | source: AutoEQ / oratory1990 in-ear
-Preamp: -1.5 dB
+Preamp: -1.6 dB
 Filter 1: ON LSC Fc 105 Hz Gain -0.6 dB Q 0.70
 Filter 2: ON PK Fc 236 Hz Gain 1.4 dB Q 0.18
 Filter 3: ON PK Fc 165 Hz Gain -2.4 dB Q 0.94

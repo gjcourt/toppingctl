@@ -1,7 +1,7 @@
 # Truthear x Crinacle Zero:RED - IEM
 # target: Harman IE 2019v2 | source: AutoEQ / crinacle 711 in-ear
 # note: a (Bass+) variant exists upstream; this is the plain tuning.
-Preamp: -3.2 dB
+Preamp: -3.3 dB
 Filter 1: ON LSC Fc 105 Hz Gain 1.5 dB Q 0.70
 Filter 2: ON PK Fc 6877 Hz Gain 3.9 dB Q 0.50
 Filter 3: ON PK Fc 335 Hz Gain -1.2 dB Q 1.26

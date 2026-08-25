@@ -34,3 +34,4 @@ jobs:
           ./toppingctl.py --dry-run power off
           ./toppingctl.py --dry-run flat
           ./toppingctl.py --dry-run apply presets/bass1.json
+          for f in presets/*.txt; do ./toppingctl.py --dry-run apply "$f"; done
