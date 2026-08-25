@@ -20,16 +20,33 @@ import devstate
 from toppingctl import Device, frame
 from vendor_commands import COMMANDS, ENUMS, FIELD_ENUM
 
-# settings-field name -> vendor command name, where the two differ.
-# INFERRED, every one. Verified only by the read-back below.
+# settings-field name -> (vendor command name, confidence).
+#
+# All of these are INFERRED from name similarity; the vendor bundle does not
+# state them. Confidence records how far each has actually been checked, because
+# "the device echoed my value back" and "the device did the thing" are different
+# claims and this project has a history of conflating them:
+#
+#   hardware  observed physically doing what the name says
+#   register  written and read back correctly, effect NOT observed
+#   unchecked never confirmed on any device
+#
+# Only `hardware` means the register does what its name claims. `register` means
+# it accepts and stores a value, which band 11 also did while driving nothing.
 ALIASES = {
-    "powered": "PowerOn", "muted": "Mute", "highGain": "HeadphoneGain",
-    "remoteEnabled": "Remote", "brightness": "ScreenBrightness",
-    "classicVuLevel": "VuMeterLevel", "vuBarMode": "VuMode",
-    "autoScreenTimeout": "DimScreenTimeout", "bluetoothMode": "AudioBluetooth",
-    "inputOptionMask": "InputOption", "outputOptionMask": "OutputOption",
-    "crossfeedConvolutionOptionMask": "CrossfeedConvolutionOption",
-    "crossfeedSimpleOptionMask": "CrossfeedSimpleOption",
+    "brightness": ("ScreenBrightness", "hardware"),
+    "classicVuLevel": ("VuMeterLevel", "register"),
+    "vuBarMode": ("VuMode", "register"),
+    "bluetoothMode": ("AudioBluetooth", "register"),
+    "powered": ("PowerOn", "unchecked"),
+    "muted": ("Mute", "unchecked"),
+    "highGain": ("HeadphoneGain", "unchecked"),
+    "remoteEnabled": ("Remote", "unchecked"),
+    "autoScreenTimeout": ("DimScreenTimeout", "unchecked"),
+    "inputOptionMask": ("InputOption", "unchecked"),
+    "outputOptionMask": ("OutputOption", "unchecked"),
+    "crossfeedConvolutionOptionMask": ("CrossfeedConvolutionOption", "unchecked"),
+    "crossfeedSimpleOptionMask": ("CrossfeedSimpleOption", "unchecked"),
 }
 # Never settable from here.
 NEVER = {"powered", "inputOptionMask", "outputOptionMask", "sampleRate"}
@@ -38,8 +55,8 @@ _BY_NAME = {n.lower(): c for c, n in COMMANDS.items()}
 
 
 def cmd_for(field):
-    name = ALIASES.get(field, field)
-    return _BY_NAME.get(name.lower()), name, field in ALIASES
+    name, conf = ALIASES.get(field, (field, "vendor"))
+    return _BY_NAME.get(name.lower()), name, conf
 
 
 def main():
@@ -53,18 +70,18 @@ def main():
 
     if a.list or not a.field:
         for f in sorted(set(FIELD_ENUM) | set(ALIASES)):
-            c, name, inf = cmd_for(f)
+            c, name, conf = cmd_for(f)
             if not c or f in NEVER:
                 continue
             e = FIELD_ENUM.get(f)
             vals = "  ".join(sorted(ENUMS[e].values())) if e else "<int>"
-            print(f"  {f:<32} {'INFERRED' if inf else '        '}  {vals}")
+            print(f"  {f:<32} {conf:<9} {vals}")
         return
 
     field = a.field
     if field in NEVER:
         sys.exit(f"{field} is not settable from here")
-    cmd, vendor_name, inferred = cmd_for(field)
+    cmd, vendor_name, conf = cmd_for(field)
     if not cmd:
         sys.exit(f"no command maps to {field!r}; try --list")
 
@@ -88,7 +105,8 @@ def main():
         )
     before = state[field]
     print(f"  {field} = {devstate.label(field, before)}  ->  {a.value}")
-    print(f"  via {vendor_name} (0x{cmd:04x}){'  [INFERRED mapping]' if inferred else ''}")
+    note = "" if conf == "vendor" else f"  [mapping inferred, confidence: {conf}]"
+    print(f"  via {vendor_name} (0x{cmd:04x}){note}")
 
     dev = Device(a.dry_run, None)
     dev.send(frame(cmd >> 8, cmd & 0xFF, raw), f"{vendor_name} = {raw}")
