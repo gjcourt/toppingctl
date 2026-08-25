@@ -15,7 +15,6 @@ should not silently shadow the other.
 | `dusk-oratory-harman-ie.txt` | Moondrop x Crinacle Blessing 2: Dusk | Harman IE 2019v2 | -1.5 dB |
 | `quark-oratory-harman-ie.txt` | Moondrop Quark | Harman IE 2019v2 | -2.6 dB |
 | `sundara-post2020pads-oratory-harman-oe.txt` | HiFiMan Sundara, post-2020 pads | Harman OE 2018 | -6.6 dB |
-| `ananda-oratory-harman-oe.txt` | HiFiMan Ananda | Harman OE 2018 | -5.6 dB |
 | `e3-oratory-harman-oe.txt` | Dan Clark Audio E3 | Harman OE 2018 | -1.0 dB |
 | `e3-oratory-harman-8k.txt` | Dan Clark Audio E3 | Harman 8k | -1.5 dB |
 | `e3-kuulokenurkka-autoeq.txt` | Dan Clark Audio E3 | see file | see file |
@@ -23,8 +22,9 @@ should not silently shadow the other.
 All are 10 filters, which is the device's real limit — band 11 accepts writes and drives
 nothing. All use only PK / LSC / HSC, the three types this tool supports.
 
-**Check the Sundara pads before using its preset.** Upstream publishes separate corrections for
-pre-2020 pads, post-2020 pads and Dekoni sheepskin, and they differ. The file here is post-2020.
+**The Sundara preset assumes STOCK pads, post-2020 revision.** Upstream publishes three separate
+corrections - pre-2020 stock, post-2020 stock, and Dekoni sheepskin - and they differ. "Stock"
+rules out the Dekoni file but does not by itself settle pre- versus post-2020.
 
 **The planar bass boosts are large** — +8.9 dB on the Sundara, +6.4 dB on the Ananda. EQ corrects
 frequency response, not distortion, and both rise in bass THD at high SPL. Keep levels moderate
