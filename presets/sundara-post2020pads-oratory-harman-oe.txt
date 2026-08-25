@@ -1,0 +1,27 @@
+# HiFiMan Sundara (POST-2020 EARPADS) - over-ear planar
+# target: Harman OE 2018 | source: AutoEQ / oratory1990 over-ear
+# NOTE: pad-revision specific, and the revisions differ a lot: post-2020 is
+# -6.7 dB preamp with a +8.9 dB low shelf, while pre-2020 and Dekoni sheepskin
+# are about -5.2 dB with a +5.3 dB shelf. This unit dates from 2021, which is
+# after the pad change, so post-2020 is the right file.
+#
+# If the bass sounds bloated or boomy with this loaded, that is the symptom of
+# post-2020 correction on pre-2020 pads -- roughly 3.6 dB too much shelf. Try
+# the pre-2020 preset instead. Pads are a wear item; a replacement set may not
+# match what the headphone shipped with.
+# NOTE: the -6.7 dB preamp is computed over 20 Hz - 20 kHz. The 105 Hz low
+# shelf keeps rising below that and reaches +8.9 dB at DC, so infrasonic
+# content can still clip. Use -9.0 dB if that matters to your source material.
+# NOTE: +8.9 dB low shelf is a large boost. Planars rise in bass THD at high SPL
+# and EQ cannot fix distortion - keep listening levels moderate with this loaded.
+Preamp: -6.7 dB
+Filter 1: ON LSC Fc 105 Hz Gain 8.9 dB Q 0.70
+Filter 2: ON PK Fc 56 Hz Gain -4.5 dB Q 0.40
+Filter 3: ON PK Fc 971 Hz Gain -1.8 dB Q 1.62
+Filter 4: ON PK Fc 2115 Hz Gain 2.1 dB Q 2.21
+Filter 5: ON PK Fc 8270 Hz Gain 1.4 dB Q 0.96
+Filter 6: ON HSC Fc 10000 Hz Gain -3.1 dB Q 0.70
+Filter 7: ON PK Fc 246 Hz Gain -0.6 dB Q 1.21
+Filter 8: ON PK Fc 128 Hz Gain 0.7 dB Q 1.44
+Filter 9: ON PK Fc 59 Hz Gain -0.6 dB Q 2.26
+Filter 10: ON PK Fc 35 Hz Gain 0.2 dB Q 1.56
