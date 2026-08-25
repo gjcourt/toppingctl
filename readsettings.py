@@ -1,24 +1,11 @@
 #!/usr/bin/env python3
 """Read the DX5 II's actual state. Not a cache -- the device is queried."""
-import time
-
-import hid
-
-from toppingctl import DEVICES, frame
+import devstate
 from vendor_commands import ENUMS, FIELD_ENUM, SETTINGS_FIELDS
 
-spec = DEVICES["dx5ii"]
-h = hid.Device(spec["vid"], spec["pid"])
-h.write(frame(0x71, 0x0c, 0, opcode=0x10))          # readNack GetSettings
-
-rec, t0 = {}, time.time()
-while time.time() - t0 < 3.0:
-    b = h.read(64, timeout=200)
-    if not b or len(b) < 15 or b[0] != 0x22 or b[1] != 0x33:
-        continue
-    if b[5] == 0x71 and b[6] == 0x0c:
-        rec[b[4]] = int.from_bytes(bytes(b[7:11]), "big")
-h.close()
+# devstate owns the read: it retries when another client holds the device and
+# tolerates the hid wrapper raising on benign zero-length reports.
+rec = devstate.read_settings(secs=3.0)
 
 name = b"".join(rec.get(i, 0).to_bytes(4, "big")[::-1] for i in range(1, 9))
 print(f"device      {name.split(b"\x00")[0].decode('ascii', 'replace').strip()}")
