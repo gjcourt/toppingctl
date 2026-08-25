@@ -55,7 +55,7 @@ DEVICES = {
         "name": "Topping DX5 II",
         "vid": 0x152A,
         "pid": 0x8750,
-        "bands": 11,
+        "bands": 10,
         "status": "confirmed",
     },
     # D90 III Discrete: same vendor, same web app, so the protocol is very
@@ -73,10 +73,20 @@ SUB_VOLUME = 0x02
 SUB_GAIN = 0x17
 SUB_COMMIT = 0x34
 
-PEQ_FIRST, PEQ_LAST = 0x91, 0x9B      # 11 band registers
+PEQ_FIRST, PEQ_LAST = 0x91, 0x9B      # 11 band registers exist ...
 REG_PREAMP = 0x9C                     # preamp: subs 01/03 = value L/R, 02/04 = enable
 PREAMP_SCALE = 1 << 25                # linear gain in Q25 fixed point
-BAND_COUNT = PEQ_LAST - PEQ_FIRST + 1
+REG_COUNT = PEQ_LAST - PEQ_FIRST + 1  # ... and all 11 are written
+# ... but only 10 of them DO anything. Tested 2026-08-24 on a DX5 II: a
+# PK 1 kHz -15 dB Q 0.7 cut written to band 10 (0x9a) was plainly audible, the
+# identical filter written to band 11 (0x9b) was inaudible, and re-applying
+# band 10 brought the cut back -- so the silence was the register, not the rig.
+# 0x9b accepts writes and commits without error; it is simply not wired to a
+# filter. The vendor UI's "BANDS n / 10" reports the hardware correctly.
+#
+# All 11 registers are still written, so a stale band 11 left behind by the
+# vendor app gets cleared rather than lingering. Only 10 are offered.
+BAND_COUNT = 10
 
 # Per-band sub-indices. 01-05 left channel, 06-0a right.
 SUB_TYPE, SUB_FREQ, SUB_GAIN_, SUB_Q, SUB_ON = 1, 2, 3, 4, 5
@@ -303,7 +313,7 @@ def validate(bands):
     """Reject nonsense before it reaches the DSP."""
     errs = []
     if len(bands) > BAND_COUNT:
-        errs.append(f"{len(bands)} filters but this device has {BAND_COUNT} bands")
+        errs.append(f"{len(bands)} filters but this device has {BAND_COUNT} usable bands")
     for i, b in enumerate(bands, 1):
         if b["type"] not in FILTER_TYPES:
             errs.append(f"filter {i}: unsupported type {b['type']}")
@@ -326,7 +336,9 @@ def cmd_apply(args):
     if errs:
         sys.exit("preset rejected:\n  " + "\n  ".join(errs))
 
-    padded = bands + [dict(DEFAULT_BAND) for _ in range(BAND_COUNT - len(bands))]
+    # Pad to REG_COUNT, not BAND_COUNT: band 11 is inert but still gets an
+    # explicit disable so nothing stale survives underneath the preset.
+    padded = bands + [dict(DEFAULT_BAND) for _ in range(REG_COUNT - len(bands))]
 
     print(f"applying {len(bands)} filter(s) from {os.path.basename(args.file)}")
     for i, b in enumerate(bands, 1):
@@ -375,7 +387,7 @@ def cmd_apply(args):
 
 def cmd_flat(args):
     dev = Device(args.dry_run, getattr(args, "device", None))
-    for i in range(BAND_COUNT):
+    for i in range(REG_COUNT):
         for f in band_frames(i, DEFAULT_BAND):
             dev.send(f, f"band{i+1} default")
     dev.commit()
