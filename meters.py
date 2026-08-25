@@ -13,7 +13,7 @@ import argparse
 import sys
 import time
 
-from toppingctl import DEVICES, frame
+from toppingctl import frame, open_checked
 
 VU, FFT = 0x7130, 0x7131
 
@@ -47,18 +47,17 @@ def main():
     ap.add_argument("--device", default="dx5ii")
     a = ap.parse_args()
 
-    import hid
-    spec = DEVICES[a.device]
-    h = hid.Device(spec["vid"], spec["pid"])
-    # The device stops streaming without a heartbeat. The vendor app sends
-    # Heartbeat (0x7134) every 5 s and re-syncs after 15 s of silence -- and
-    # every write this tool makes ends in a "commit", which is the same
-    # register, which is why the stream looked unsolicited at first.
+    h = open_checked(a.device)
+    # The heartbeat is the whole gate. The vendor app sends Heartbeat (0x7134)
+    # every 5 s; without it the device goes quiet. The display page is NOT a
+    # factor -- an earlier reading of this claimed it was, from an experiment
+    # that changed the page by WRITING to it, and every write ends in a commit,
+    # which is this same register. Two variables, one conclusion, wrong one.
     HEARTBEAT = frame(0x71, 0x34, 1)
     next_beat = 0.0
     vu_buf, fft_buf = {}, {}
     counts = {VU: 0, FFT: 0, "other": 0}
-    last = 0.0
+    last_vu = last_fft = 0.0
     t0 = time.time()
     try:
         while time.time() - t0 < a.secs:
@@ -78,18 +77,19 @@ def main():
                 counts[VU] += 1
                 for i, byte in enumerate(_u8x4(val)):
                     vu_buf[4 * idx + i] = byte
-                if all(i in vu_buf for i in range(8)) and time.time() - last > 0.15:
-                    last = time.time()
+                if all(i in vu_buf for i in range(8)) and time.time() - last_vu > 0.15:
+                    last_vu = time.time()
                     left = _i16(vu_buf[0], vu_buf[1])
                     right = _i16(vu_buf[2], vu_buf[3])
                     print(f"  VU  L {left:4d} dB |{_bar(left)}|   "
                           f"R {right:4d} dB |{_bar(right)}|")
+                    vu_buf.clear()
             elif cmd == FFT:
                 counts[FFT] += 1
                 for i, byte in enumerate(_u8x4(val)):
                     fft_buf[4 * idx + i] = byte
-                if all(i in fft_buf for i in range(30)) and time.time() - last > 0.15:
-                    last = time.time()
+                if all(i in fft_buf for i in range(30)) and time.time() - last_fft > 0.15:
+                    last_fft = time.time()
                     bands = [_i8(fft_buf[i]) for i in range(30)]
                     spark = "".join(" ▁▂▃▄▅▆▇█"[max(0, min(8, round((d + 60) / 60 * 8)))]
                                     for d in bands)
@@ -102,8 +102,8 @@ def main():
     print(f"\n  VU frames {counts[VU]}   FFT frames {counts[FFT]}   "
           f"other {counts['other']}")
     if not counts[VU] and not counts[FFT]:
-        print("  nothing pushed. play audio, and note the meters may only stream")
-        print("  when the display is on a VU or FFT page (see homePage).")
+        print("  nothing pushed. the heartbeat above should keep the stream")
+        print("  alive; check the device is awake and audio is playing.")
     return 0
 
 

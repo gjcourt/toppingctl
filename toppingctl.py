@@ -232,6 +232,23 @@ def find_devices():
     return found
 
 
+def open_checked(dev_key="dx5ii"):
+    """Open the device with the model check applied.
+
+    Everything that talks to the hardware must come through here. The check
+    used to live only in Device.__init__, so devstate, meters and listen -- all
+    of which open their own handle -- drove whatever was on the VID/PID pair.
+    An E50 II would have been decoded through the DX5 II settings map and
+    reported as confident wrong values.
+    """
+    import hid
+    spec = DEVICES[dev_key]
+    probe = Device.__new__(Device)
+    probe.spec = spec
+    path = probe._check_model()
+    return hid.Device(path=path) if path else hid.Device(spec["vid"], spec["pid"])
+
+
 class Device:
     """A Topping DAC over USB HID.
 
@@ -247,9 +264,10 @@ class Device:
             sys.exit(f"unknown device {self.key!r}; known: {', '.join(DEVICES)}")
         self.spec = DEVICES[self.key]
         if not dry_run:
-            self._check_model()
+            path = self._check_model()
             try:
-                self.h = hid.Device(self.spec["vid"], self.spec["pid"])
+                self.h = hid.Device(path=path) if path else \
+                    hid.Device(self.spec["vid"], self.spec["pid"])
             except Exception as e:
                 hint = ""
                 others = [f for f in find_devices() if not f["known"]]
@@ -265,6 +283,8 @@ class Device:
     @staticmethod
     def _normalise(name):
         """Vendor's comparison: upper-case, Roman numeral to II, alnum only."""
+        if isinstance(name, bytes):
+            name = name.decode("utf-8", "replace")
         return "".join(c for c in (name or "").upper().replace("\u2161", "II")
                        if c.isalnum())
 
@@ -277,11 +297,26 @@ class Device:
         """
         want = self.spec.get("product_match")
         if not want:
-            return
-        seen = [d.get("product_string") for d in hid.enumerate(
-            self.spec["vid"], self.spec["pid"])]
-        if any(self._normalise(p) in want for p in seen if p):
-            return
+            return None
+        try:
+            entries = hid.enumerate(self.spec["vid"], self.spec["pid"])
+        except Exception as e:
+            sys.exit(f"cannot enumerate HID devices: {e}")
+        matched = [d for d in entries
+                   if any(self._normalise(d.get("product_string")).startswith(w)
+                          or w in self._normalise(d.get("product_string"))
+                          for w in want)]
+        # Opening by VID/PID when several devices share it would hand back an
+        # arbitrary one -- possibly the very E50 II this check exists to avoid.
+        # So return the matched entry's path and open THAT, not the pair.
+        if len(matched) == 1:
+            return matched[0].get("path")
+        if len(matched) > 1:
+            sys.exit(
+                f"{len(matched)} devices match {self.spec['name']}; "
+                f"disambiguate by unplugging one."
+            )
+        seen = [d.get("product_string") for d in entries]
         sys.exit(
             f"refusing to drive {self.spec['name']}: attached device on "
             f"{self.spec['vid']:#06x}/{self.spec['pid']:#06x} reports "
