@@ -15,7 +15,12 @@ from vendor_commands import (
 rec = devstate.read_settings(secs=3.0)
 
 name = b"".join(rec.get(i, 0).to_bytes(4, "big")[::-1] for i in range(1, 9))
-print(f"device      {name.split(b"\x00")[0].decode('ascii', 'replace').strip()}")
+# Extracted rather than inlined: nested same-type quotes inside an f-string
+# are PEP 701, which needs Python >= 3.12. The audio nodes this runs on ship
+# Python 3.11, and CI only tested 3.14, so the incompatibility stayed
+# invisible until the tool was actually run on one.
+dev_name = name.split(b"\x00")[0].decode("ascii", "replace").strip()
+print(f"device      {dev_name}")
 print(f"records     {len(rec)}  (firmware >= 2.40 adds 48..51: "
       f"{'yes' if max(rec, default=0) >= 48 else 'no'})\n")
 for i in sorted(rec):

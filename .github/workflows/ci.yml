@@ -9,12 +9,19 @@ on:
 jobs:
   lint-and-dryrun:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is not decoration: the audio nodes this tool runs on ship Debian
+        # bookworm's Python 3.11, and a PEP 701 f-string slipped in unnoticed
+        # because CI only ever tested the newest interpreter.
+        python-version: ['3.11', '3.14']
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.14'
+          python-version: ${{ matrix.python-version }}
 
       - name: Install hidapi
         run: |
