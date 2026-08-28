@@ -54,12 +54,17 @@ except ImportError:
 #                 with the device runs `toppingctl devices`
 #
 DEVICES = {
+    # ⚠️ "status" is ENFORCED, not a label. A device that is not "confirmed"
+    # refuses writes unless --unverified is passed. It used to be decorative,
+    # which meant adding an entry -- documented as "a claim that the register
+    # map matches" -- silently granted full write access to hardware nobody had
+    # tested. Reads and --dry-run are always allowed; that is how you test.
     "dx5ii": {
         "name": "Topping DX5 II",
         "vid": 0x152A,
         "pid": 0x8750,
         "bands": 10,
-        # PID 0x8750 is NOT unique: the DX1 II and E50 II ship the same one, and
+        # PID 0x8750 is NOT unique: the DX1 II, E50 II and D90 III Discrete ship the same one, and
         # their register maps collide across 0x7101-0x7131 with DIFFERENT
         # meanings -- 0x7113 is HomePage here and BluetoothMode on an E50 II.
         # So the PID cannot identify the model and the USB product string is
@@ -67,9 +72,94 @@ DEVICES = {
         "product_match": ("DX5II", "DX52", "DX5"),
         "status": "confirmed",
     },
-    # D90 III Discrete: same vendor, same web app, so the protocol is very
-    # likely identical -- but the PID has never been read off one, and band
-    # count is unconfirmed. Do not guess it; see README "Adding a device".
+    "d90iii": {
+        "name": "Topping D90 III Discrete",
+        "vid": 0x152A,
+        # Read off real hardware 2026-08-28: the D90 III reports the SAME
+        # 0x8750 as the DX5 II, confirming the PID identifies nothing.
+        "pid": 0x8750,
+        "product_match": ("D90III", "D90IIIDISCRETE", "D90"),
+        # Report id 0 + 15-byte payload. See Device._wire().
+        "report_id_prefix": True,
+        # The vendor manual (TP234A v1.4, p.10) documents ten: "TOPPING Tune
+        # 拥有 PEQ 调节功能, 支持十段自定义频点调节". Still None, deliberately.
+        # The DX5 II's 10 was established by writing a filter to each band and
+        # listening, and that same exercise found an eleventh register that
+        # accepts writes and drives nothing -- so vendor documentation is
+        # evidence, not confirmation. Set this to 10 once a filter written to
+        # band 10 is audible on THIS device.
+        "bands": 10,
+        # ✅ WRITES CONFIRMED ON HARDWARE 2026-08-28, once the framing was
+        # fixed -- see Device._wire(). The register map DOES transfer; the
+        # earlier failures were entirely a one-byte framing error:
+        #
+        #   >>> write band1 freq = 1000 Hz
+        #   echo reg=0x91 sub=0x02 value=1000 crc=c227
+        #
+        # The device ECHOES every accepted write back with a computed CRC,
+        # which is an acknowledgement channel this codebase has never used.
+        # It is the direct answer to the README's "a DAC that silently
+        # accepts a wrong register write is the failure mode to fear": with
+        # echoes, that failure is detectable rather than silent. Wiring
+        # send() to verify against the echo is the obvious follow-up.
+        #
+        # VOLUME IS NOT ON THIS INTERFACE AT ALL -- established 2026-08-28,
+        # not inferred. The device was moved from -0.5 dB to -20.0 dB on its
+        # front panel and the full state enumeration (74 field indices, via
+        # the 0x4a/idx query below) showed NO field tracking the change.
+        # Targeted probes of 0x71 with opcodes 0x20/0x21/0x2f and both b3
+        # forms return only the 0x11/0x13 PEQ stream. So this model's volume
+        # is knob/remote only: Topping Tune is a PEQ tool and the protocol it
+        # speaks carries PEQ, preamp, EQ-enable, firmware and sample rate --
+        # not volume. Host-side volume for a D90 III means the UAC2/ALSA
+        # mixer, which only exists on the USB input.
+        #
+        # Still NOT marked confirmed, for one specific reason: VOLUME. The
+        # vendor's own Topping Tune never touches 0x71 in 298 captured
+        # frames, and 0x71/0x02 does not move this device's front panel even
+        # with correct framing. PEQ (0x91-0x9b), preamp (0x9c) and EQ enable
+        # (0x9e sub 01) are all exercised by the vendor and echo correctly.
+        # Historical note -- the original failures, before framing was fixed:
+        #   - The settings READ returns no records at all, so volumeStep
+        #     cannot be discovered (hence --vol-step).
+        #   - A volume WRITE is accepted with no error -- `vol -30` reported
+        #     "volume -30.0 dB (raw 60)" -- and the front panel did not move.
+        #     Line Out was PRE at the time, so volume was adjustable; the
+        #     device simply swallowed it.
+        # That is the exact failure this guard exists for: silent acceptance
+        # of a wrong register. Do NOT mark this confirmed, and do not assume
+        # any other register in the DX5 II map applies here.
+        #
+        # WHY THE DX5 II ROUTE DOES NOT REPEAT HERE. Topping ship two
+        # different tools, with COMPLEMENTARY -- not overlapping -- device
+        # support, verified 2026-08-28:
+        #   home.toppingaudio.com (web) : DX1 II, DX5 II          <- JS bundle
+        #   Topping Tune (desktop V1.16): D50 III, D90 III Discrete,
+        #                                 Centaurus, D900, DX9 Discrete,
+        #                                 E50 II, DX1 II          <- Qt/C++
+        # The DX5 II map in vendor_commands.py came from the WEB app's
+        # JavaScript bundle. The web app has no d90iii device code at all --
+        # its /client-capabilities feature flags list only dx1ii and dx5ii --
+        # so there is no bundle to read for this model. The desktop app that
+        # does drive it is a Qt binary: its strings carry the device names but
+        # no command tables, and HID goes straight to IOKit.
+        #
+        # So the D90 III protocol is not statically extractable the way the
+        # DX5 II's was. It needs USB capture against the desktop app
+        # (Windows + USBPcap is the tractable rig; there is no Linux build).
+        #
+        # Band count: Topping Tune reads "EQ Max NUM:10" off the device, and
+        # writes to 0x91 now echo correctly, so 10 is set below.
+        #
+        # And one documented difference already argues against assuming it.
+        # The DX5 II's volumeStep is a global half_db/one_db choice. On the
+        # D90 III the manual (setup item 17) makes the step RANGE-DEPENDENT:
+        # fixed 0.5 dB above -50 dB, selectable 0.5 or 1.0 dB from -50 to
+        # -99 dB. Any code deriving a dB scale from a single volumeStep field
+        # is therefore wrong here for part of the range. Resolve before
+        # marking confirmed.
+        "status": "unverified",
+    },
 }
 
 THESYCON_VID = 0x152A
@@ -108,6 +198,26 @@ REG_COUNT = PEQ_LAST - PEQ_FIRST + 1  # ... and all 11 are written
 # All 11 registers are still written, so a stale band 11 left behind by the
 # vendor app gets cleared rather than lingering. Only 10 are offered.
 BAND_COUNT = 10
+
+
+def band_count(spec):
+    """Bands for a model, or exit if that number was never established.
+
+    Per-device "bands" used to be dead data -- declared in DEVICES and never
+    read, with this module-level constant used everywhere instead. That is
+    harmless while one model is supported and wrong the moment a second is
+    added, so it now resolves per device and refuses rather than defaulting.
+    """
+    n = spec.get("bands", BAND_COUNT)
+    if n is None:
+        sys.exit(
+            f"{spec['name']}: PEQ band count is not established for this model.\n"
+            "It is not read from a datasheet -- the DX5 II's 10 was found by "
+            "writing a filter to each band and listening, which also caught an "
+            "eleventh register that accepts writes and drives nothing.\n"
+            "Do the same here before using PEQ, then set \"bands\" in DEVICES."
+        )
+    return n
 
 # Per-band sub-indices. 01-05 left channel, 06-0a right.
 SUB_TYPE, SUB_FREQ, SUB_GAIN_, SUB_Q, SUB_ON = 1, 2, 3, 4, 5
@@ -225,11 +335,36 @@ def preamp_frames(db):
 
 # --- device -----------------------------------------------------------------
 
+def _product_matches(spec, product_string):
+    """True if this USB product string is one this spec claims.
+
+    Extracted so find_devices() and Device._check_model() apply the SAME test.
+    They used to differ: the open path checked the product string and the
+    listing path checked only the PID, which is how an unknown model came to be
+    listed as a known one.
+    """
+    want = spec.get("product_match")
+    if not want:
+        return True
+    name = Device._normalise(product_string)
+    return any(name.startswith(w) or w in name for w in want)
+
+
 def find_devices():
     """Enumerate every Thesycon-VID HID device, flagging which we know."""
     found = []
     for d in hid.enumerate(THESYCON_VID, 0):
-        key = next((k for k, v in DEVICES.items() if v["pid"] == d["product_id"]), None)
+        # Match on the PRODUCT STRING, not the PID. Matching on PID alone
+        # reported a D90 III Discrete as "known: dx5ii" -- measured 2026-08-28
+        # on real hardware -- because six Topping models share 0x8750. That
+        # inverted the safety default the README's step 1 depends on: an
+        # unrecognised DAC appeared as an already-confirmed one, so following
+        # the documented procedure walked straight past the guard.
+        key = next(
+            (k for k, v in DEVICES.items()
+             if v["pid"] == d["product_id"] and _product_matches(v, d.get("product_string"))),
+            None,
+        )
         found.append({
             "key": key,
             "pid": d["product_id"],
@@ -263,8 +398,9 @@ class Device:
     only the PID and band count differ, so both now come from DEVICES.
     """
 
-    def __init__(self, dry_run=False, key=None):
+    def __init__(self, dry_run=False, key=None, allow_unverified=False):
         self.dry_run = dry_run
+        self.allow_unverified = allow_unverified
         self.h = None
         self.key = key or "dx5ii"
         if self.key not in DEVICES:
@@ -346,11 +482,64 @@ class Device:
             f"collide with this map and mean different things."
         )
 
+    def require_writable(self):
+        """Refuse an unverified model BEFORE any I/O happens.
+
+        send() also enforces this, but several commands read from the device
+        first -- `vol` reads volumeStep to derive the dB scale -- so relying on
+        send() alone surfaced a confusing "device returned no settings records"
+        instead of the actual reason. Measured on a D90 III, 2026-08-28.
+        """
+        if self.dry_run or self.allow_unverified:
+            return
+        if self.spec.get("status") != "confirmed":
+            self._refuse_unverified()
+
+    def _refuse_unverified(self):
+        sys.exit(
+            f"refusing to write to {self.spec['name']}: its register map is "
+            f"{self.spec.get('status', 'unknown')}, not confirmed.\n"
+            "Six Topping models share USB 0x152a/0x8750 and their registers "
+            "collide -- 0x7113 is HomePage on one and BluetoothMode on "
+            "another -- so an unconfirmed map can write a real value to the "
+            "wrong setting and report success.\n"
+            "Read and --dry-run work without this flag; that is how you "
+            "verify. When a write moves the FRONT PANEL as expected, mark the "
+            "entry confirmed. To proceed anyway: --unverified"
+        )
+
+    def _wire(self, f):
+        """Put the frame on the wire the way THIS model expects it.
+
+        hidapi's write() takes byte 0 as the REPORT ID. Captured from the
+        vendor's own Topping Tune driving a D90 III (2026-08-28), every frame
+        goes out as report id 0 followed by a 15-byte payload ending 66 77:
+
+            id=0  22 33 20 01 01 91 02 00 00 00 14 00 00 66 77
+
+        frame() builds 16 bytes with a trailing 00 instead, so writing it
+        directly makes hidapi read 0x22 as the report id and ship the rest
+        shifted by one byte. The DX5 II tolerates that; the D90 III silently
+        drops it -- which is the entire "accepted with no effect" mystery.
+
+        Per-device rather than fixed globally: the DX5 II path is
+        hardware-confirmed as it stands, and changing its framing is a separate
+        change needing its own verification.
+        """
+        if self.spec.get("report_id_prefix"):
+            return bytes([0x00]) + f[:15]
+        return f
+
     def send(self, f, label=""):
+        # Second line of defence: a command that forgets require_writable()
+        # still cannot reach hardware.
+        if not self.dry_run and self.spec.get("status") != "confirmed" \
+                and not self.allow_unverified:
+            self._refuse_unverified()
         if self.dry_run:
             print(f"  {f.hex(' ')}  {label}")
             return
-        self.h.write(f)
+        self.h.write(self._wire(f))
         time.sleep(0.004)      # the vendor app paces writes; don't flood the DSP
 
     def commit(self):
@@ -422,11 +611,16 @@ def load_preset(path):
     return parse_autoeq(text)
 
 
-def validate(bands):
-    """Reject nonsense before it reaches the DSP."""
+def validate(bands, max_bands=BAND_COUNT):
+    """Reject nonsense before it reaches the DSP.
+
+    max_bands is per-device: a model's usable band count is a measured property,
+    not a constant. Defaults to the DX5 II's 10 so existing callers are
+    unchanged.
+    """
     errs = []
-    if len(bands) > BAND_COUNT:
-        errs.append(f"{len(bands)} filters but this device has {BAND_COUNT} usable bands")
+    if len(bands) > max_bands:
+        errs.append(f"{len(bands)} filters but this device has {max_bands} usable bands")
     for i, b in enumerate(bands, 1):
         if b["type"] not in FILTER_TYPES:
             errs.append(f"filter {i}: unsupported type {b['type']}")
@@ -441,11 +635,41 @@ def validate(bands):
 
 # --- commands ---------------------------------------------------------------
 
+def assert_writable(args):
+    """Refuse an unverified model before any I/O at all.
+
+    Must be spec-level, not Device-level: cmd_vol deliberately reads
+    volumeStep *before* constructing a Device (so two handles are never open
+    at once), so a check on the Device object runs too late and the user sees
+    "device returned no settings records" instead of the real reason.
+    Measured against a D90 III, 2026-08-28.
+    """
+    if getattr(args, "dry_run", False) or getattr(args, "unverified", False):
+        return
+    spec = DEVICES.get(getattr(args, "device", None) or "dx5ii")
+    if spec and spec.get("status") != "confirmed":
+        sys.exit(
+            f"refusing to write to {spec['name']}: its register map is "
+            f"{spec.get('status', 'unknown')}, not confirmed.\n"
+            "Six Topping models share USB 0x152a/0x8750 and their registers "
+            "collide -- 0x7113 is HomePage on one and BluetoothMode on "
+            "another -- so an unconfirmed map can write a real value to the "
+            "wrong setting and report success.\n"
+            "Reads and --dry-run work without this flag; that is how you "
+            "verify. When a write moves the FRONT PANEL as expected, mark the "
+            "entry confirmed. To proceed anyway: --unverified"
+        )
+
+
 def cmd_apply(args):
+    assert_writable(args)
     bands, preamp, skipped = load_preset(args.file)
     if not bands:
         sys.exit(f"no usable filters found in {args.file}")
-    errs = validate(bands)
+    # Resolve the band count for THIS device before validating against it.
+    # Exits if the model's band count was never established, rather than
+    # silently validating against the DX5 II's 10.
+    errs = validate(bands, band_count(DEVICES[getattr(args, "device", None) or "dx5ii"]))
     if errs:
         sys.exit("preset rejected:\n  " + "\n  ".join(errs))
 
@@ -476,7 +700,8 @@ def cmd_apply(args):
             print("  last -- which this tool cannot read back. Positive gain with no preamp")
             print(f"  can clip. Set one first:  ./toppingctl.py preamp {-abs(boost):.1f}")
 
-    dev = Device(args.dry_run, getattr(args, "device", None))
+    dev = Device(args.dry_run, getattr(args, "device", None),
+                 allow_unverified=getattr(args, "unverified", False))
     if preamp is not None:
         for f in preamp_frames(preamp):
             dev.send(f, f"preamp {preamp:+.1f}")
@@ -499,7 +724,9 @@ def cmd_apply(args):
 
 
 def cmd_flat(args):
-    dev = Device(args.dry_run, getattr(args, "device", None))
+    assert_writable(args)
+    dev = Device(args.dry_run, getattr(args, "device", None),
+                 allow_unverified=getattr(args, "unverified", False))
     for i in range(REG_COUNT):
         for f in band_frames(i, DEFAULT_BAND):
             dev.send(f, f"band{i+1} default")
@@ -514,6 +741,7 @@ def cmd_flat(args):
 
 
 def cmd_preamp(args):
+    assert_writable(args)
     db = args.db
     if not -40.0 <= db <= 10.0:
         sys.exit(f"preamp {db} dB out of range (-40..+10)")
@@ -521,7 +749,8 @@ def cmd_preamp(args):
     if db > 0:
         print(f"  warning: positive preamp ({db:+.1f} dB) can clip. AutoEQ presets"
               f" are always negative.")
-    dev = Device(args.dry_run, getattr(args, "device", None))
+    dev = Device(args.dry_run, getattr(args, "device", None),
+                 allow_unverified=getattr(args, "unverified", False))
     for f in preamp_frames(db):
         dev.send(f, f"preamp {db:+.1f} dB")
     dev.commit()
@@ -534,6 +763,7 @@ def cmd_preamp(args):
 
 
 def cmd_vol(args):
+    assert_writable(args)
     db = args.db
     if not VOL_MIN_DB <= db <= VOL_MAX_DB:
         sys.exit(f"volume {db} dB out of range ({VOL_MIN_DB}..{VOL_MAX_DB})")
@@ -550,20 +780,34 @@ def cmd_vol(args):
     # only grants one -- and it takes a device KEY, not a Device instance.
     key = getattr(args, "device", None) or "dx5ii"
     step_db = 0.5
-    if not args.dry_run:
+    if getattr(args, "vol_step", None):
+        # Explicit override. Needed because the settings READ is model-specific
+        # and can fail on a device whose WRITE path may still be fine: a D90 III
+        # returns no settings records to the DX5 II read protocol (measured
+        # 2026-08-28), which blocked the very write test that would establish
+        # whether its register map matches. Its manual documents the step
+        # directly -- fixed 0.5 dB above -50 dB -- so the number does not have
+        # to be discovered by reading the device.
+        step_db = float(args.vol_step)
+    elif not args.dry_run:
         try:
             import devstate  # local: devstate imports this module
             step_db = 1.0 if devstate.read_settings(key)[32] == 1 else 0.5
         except Exception as e:                      # noqa: BLE001 - deliberate
             # Refuse rather than guess: a wrong scale silently doubles or
             # halves every level on a headphone amp.
-            sys.exit(f"cannot read volumeStep to determine the dB scale: {e}")
+            sys.exit(
+                f"cannot read volumeStep to determine the dB scale: {e}\n"
+                "If this model's step is documented, pass it explicitly: "
+                "--vol-step 0.5"
+            )
     steps = int(round(-db / step_db))
     actual = -steps * step_db
     # Guard before anything is opened or sent.
     if db > VOL_WARN_DB and not args.force:
         sys.exit(f"{actual:+.1f} dB is loud — re-run with --force if you mean it")
-    dev = Device(args.dry_run, getattr(args, "device", None))
+    dev = Device(args.dry_run, getattr(args, "device", None),
+                 allow_unverified=getattr(args, "unverified", False))
     dev.send(frame(REG_CTRL, SUB_VOLUME, steps),
              f"volume {actual:+.1f} dB ({step_db} dB/step)")
     dev.commit()
@@ -576,8 +820,10 @@ def cmd_vol(args):
 
 
 def cmd_gain(args):
+    assert_writable(args)
     on = args.state == "on"
-    dev = Device(args.dry_run, getattr(args, "device", None))
+    dev = Device(args.dry_run, getattr(args, "device", None),
+                 allow_unverified=getattr(args, "unverified", False))
     dev.send(frame(REG_CTRL, SUB_GAIN, 1 if on else 0), f"gain {args.state}")
     dev.commit()
     dev.close()
@@ -590,8 +836,10 @@ def cmd_gain(args):
 
 
 def cmd_power(args):
+    assert_writable(args)
     on = args.state == "on"
-    dev = Device(args.dry_run, getattr(args, "device", None))
+    dev = Device(args.dry_run, getattr(args, "device", None),
+                 allow_unverified=getattr(args, "unverified", False))
     dev.send(frame(REG_CTRL, SUB_POWER, int(on), b4=SUB_POWER_B4, crc=True),
              f"power {args.state}")
     dev.close()
@@ -654,6 +902,14 @@ def main():
         description="Local control for Topping DACs over USB HID.")
     p.add_argument("--device", default="dx5ii", choices=sorted(DEVICES),
                    help="which model to talk to (default: dx5ii)")
+    p.add_argument("--vol-step", choices=("0.5", "1.0"),
+                   help="dB per raw volume step, instead of reading it from "
+                        "the device. For models whose settings read is not "
+                        "supported but whose step is documented.")
+    p.add_argument("--unverified", action="store_true",
+                   help="allow writes to a device whose register map is "
+                        "unverified. You are asserting you will watch the "
+                        "hardware and confirm it did the right thing.")
     p.add_argument("--dry-run", action="store_true",
                    help="print frames instead of sending them")
     sub = p.add_subparsers(dest="cmd", required=True)
