@@ -544,22 +544,26 @@ def cmd_vol(args):
     # asked for -- `vol -30` lands at -60 dB. The error is always in the quiet
     # direction, so it is not dangerous, but it is wrong and it makes the
     # --force guard fire for levels that are not actually loud.
-    dev = Device(args.dry_run, getattr(args, "device", None))
+    # Read the scale FIRST, and let that read close its own handle before the
+    # writer opens one. read_settings() calls open_checked() internally, so
+    # holding a Device open across it would mean two handles on a device that
+    # only grants one -- and it takes a device KEY, not a Device instance.
+    key = getattr(args, "device", None) or "dx5ii"
     step_db = 0.5
     if not args.dry_run:
         try:
             import devstate  # local: devstate imports this module
-            step_db = 1.0 if devstate.read_settings(dev)[32] == 1 else 0.5
-        except Exception as e:                      # noqa: BLE001 - see below
+            step_db = 1.0 if devstate.read_settings(key)[32] == 1 else 0.5
+        except Exception as e:                      # noqa: BLE001 - deliberate
             # Refuse rather than guess: a wrong scale silently doubles or
             # halves every level on a headphone amp.
-            dev.close()
             sys.exit(f"cannot read volumeStep to determine the dB scale: {e}")
     steps = int(round(-db / step_db))
     actual = -steps * step_db
+    # Guard before anything is opened or sent.
     if db > VOL_WARN_DB and not args.force:
-        dev.close()
         sys.exit(f"{actual:+.1f} dB is loud — re-run with --force if you mean it")
+    dev = Device(args.dry_run, getattr(args, "device", None))
     dev.send(frame(REG_CTRL, SUB_VOLUME, steps),
              f"volume {actual:+.1f} dB ({step_db} dB/step)")
     dev.commit()
