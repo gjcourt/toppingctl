@@ -88,7 +88,7 @@ DEVICES = {
         # accepts writes and drives nothing -- so vendor documentation is
         # evidence, not confirmation. Set this to 10 once a filter written to
         # band 10 is audible on THIS device.
-        "bands": None,
+        "bands": 10,
         # ✅ WRITES CONFIRMED ON HARDWARE 2026-08-28, once the framing was
         # fixed -- see Device._wire(). The register map DOES transfer; the
         # earlier failures were entirely a one-byte framing error:
