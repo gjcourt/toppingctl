@@ -97,9 +97,29 @@ DEVICES = {
         #     device simply swallowed it.
         # That is the exact failure this guard exists for: silent acceptance
         # of a wrong register. Do NOT mark this confirmed, and do not assume
-        # any other register in the DX5 II map applies here. The protocol
-        # needs establishing on its own terms -- most likely by capturing what
-        # Topping Tune sends, since the vendor app does drive this model.
+        # any other register in the DX5 II map applies here.
+        #
+        # WHY THE DX5 II ROUTE DOES NOT REPEAT HERE. Topping ship two
+        # different tools, with COMPLEMENTARY -- not overlapping -- device
+        # support, verified 2026-08-28:
+        #   home.toppingaudio.com (web) : DX1 II, DX5 II          <- JS bundle
+        #   Topping Tune (desktop V1.16): D50 III, D90 III Discrete,
+        #                                 Centaurus, D900, DX9 Discrete,
+        #                                 E50 II, DX1 II          <- Qt/C++
+        # The DX5 II map in vendor_commands.py came from the WEB app's
+        # JavaScript bundle. The web app has no d90iii device code at all --
+        # its /client-capabilities feature flags list only dx1ii and dx5ii --
+        # so there is no bundle to read for this model. The desktop app that
+        # does drive it is a Qt binary: its strings carry the device names but
+        # no command tables, and HID goes straight to IOKit.
+        #
+        # So the D90 III protocol is not statically extractable the way the
+        # DX5 II's was. It needs USB capture against the desktop app
+        # (Windows + USBPcap is the tractable rig; there is no Linux build).
+        #
+        # Band count is settled even so: Topping Tune reads "EQ Max NUM:10"
+        # off the device. Still not set below, because band count is moot
+        # while no write reaches the hardware.
         #
         # And one documented difference already argues against assuming it.
         # The DX5 II's volumeStep is a global half_db/one_db choice. On the

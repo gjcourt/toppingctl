@@ -57,6 +57,18 @@ that is how you get through steps 3 and 4. Before this, adding an entry silently
 granted full write access to hardware nobody had tested, which is the opposite
 of what this procedure says it does.
 
+**Vendor tooling is split by model, and the split is not intuitive.** As of
+2026-08-28 the browser app at `home.toppingaudio.com` drives **DX1 II and
+DX5 II**; the desktop *Topping Tune* (V1.16) drives **D50 III, D90 III
+Discrete, Centaurus, D900, DX9 Discrete, E50 II, DX1 II**. Neither covers
+both a DX5 II and a D90 III. The web app is not a newer replacement for the
+desktop one — assuming so sends you to a tool that cannot see your DAC and
+reports it as a network error.
+
+This matters for reverse engineering: the DX5 II map here came from the web
+app's **JavaScript** bundle. Models only the desktop app supports have no such
+bundle — it is a Qt/C++ binary — so their protocol needs USB capture instead.
+
 **`bands` is per-device and is not guessed.** `None` means the count was never
 established, and PEQ commands refuse rather than falling back to the DX5 II's
 10. That number was found by writing a filter to each band and listening — it
