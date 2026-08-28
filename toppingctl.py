@@ -79,15 +79,25 @@ DEVICES = {
         # 0x8750 as the DX5 II, confirming the PID identifies nothing.
         "pid": 0x8750,
         "product_match": ("D90III", "D90IIIDISCRETE", "D90"),
-        # Band count is NOT known for this model. The DX5 II has 10, but that
-        # was established by writing a filter to each band and listening --
-        # not read from a datasheet. Guessing here would put an untested number
-        # behind every preset, which is the error already made once with the
-        # DX5 II's phantom eleventh band. None => PEQ commands refuse.
+        # The vendor manual (TP234A v1.4, p.10) documents ten: "TOPPING Tune
+        # 拥有 PEQ 调节功能, 支持十段自定义频点调节". Still None, deliberately.
+        # The DX5 II's 10 was established by writing a filter to each band and
+        # listening, and that same exercise found an eleventh register that
+        # accepts writes and drives nothing -- so vendor documentation is
+        # evidence, not confirmation. Set this to 10 once a filter written to
+        # band 10 is audible on THIS device.
         "bands": None,
         # USB product string and HID usage page 1 both match the DX5 II's
         # shape, so the protocol is *probably* the same. Probably is not
         # confirmed: nobody has watched this device's front panel move.
+        #
+        # And one documented difference already argues against assuming it.
+        # The DX5 II's volumeStep is a global half_db/one_db choice. On the
+        # D90 III the manual (setup item 17) makes the step RANGE-DEPENDENT:
+        # fixed 0.5 dB above -50 dB, selectable 0.5 or 1.0 dB from -50 to
+        # -99 dB. Any code deriving a dB scale from a single volumeStep field
+        # is therefore wrong here for part of the range. Resolve before
+        # marking confirmed.
         "status": "unverified",
     },
 }
