@@ -41,12 +41,26 @@ Anything reported `UNKNOWN` is *not* assumed compatible. Adding an entry to
 `DEVICES` is a **claim that the register map matches**, and only testing
 establishes that. The order that matters:
 
-1. `devices` to get the PID.
-2. Add the entry with `"status": "unverified"`.
-3. `--dry-run` everything first and read the frames.
-4. `vol` at a **safe level** and watch the front panel. If the display moves, the
-   register map holds.
-5. Only then `smoke.py`, and only then mark it confirmed.
+1. `devices` to get the PID **and the USB product string**. The PID identifies
+   nothing — six models ship `0x8750` — so the product string is what the entry
+   matches on.
+2. Add the entry with `"status": "unverified"` and `"bands": None`.
+3. `--dry-run` everything first and read the frames. Note `--dry-run` is a
+   **global** flag: it goes *before* the subcommand.
+4. `vol` at a **safe level**, with `--unverified`, and watch the front panel. If
+   the display moves, the register map holds.
+5. Only then `smoke.py`, and only then mark it confirmed and set `bands`.
+
+**`status` is enforced, not a label.** Anything other than `confirmed` refuses
+writes unless `--unverified` is passed. Reads and `--dry-run` always work —
+that is how you get through steps 3 and 4. Before this, adding an entry silently
+granted full write access to hardware nobody had tested, which is the opposite
+of what this procedure says it does.
+
+**`bands` is per-device and is not guessed.** `None` means the count was never
+established, and PEQ commands refuse rather than falling back to the DX5 II's
+10. That number was found by writing a filter to each band and listening — it
+also caught an eleventh register that accepts writes and drives nothing.
 
 **A DAC that silently accepts a wrong register write is the failure mode to
 fear**, which is why step 4 uses a control with visible feedback.
