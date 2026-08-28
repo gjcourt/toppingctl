@@ -87,9 +87,19 @@ DEVICES = {
         # evidence, not confirmation. Set this to 10 once a filter written to
         # band 10 is audible on THIS device.
         "bands": None,
-        # USB product string and HID usage page 1 both match the DX5 II's
-        # shape, so the protocol is *probably* the same. Probably is not
-        # confirmed: nobody has watched this device's front panel move.
+        # ⚠️ TESTED 2026-08-28 ON HARDWARE, AND IT DOES NOT WORK. The DX5 II
+        # map is NOT transferable to this model:
+        #   - The settings READ returns no records at all, so volumeStep
+        #     cannot be discovered (hence --vol-step).
+        #   - A volume WRITE is accepted with no error -- `vol -30` reported
+        #     "volume -30.0 dB (raw 60)" -- and the front panel did not move.
+        #     Line Out was PRE at the time, so volume was adjustable; the
+        #     device simply swallowed it.
+        # That is the exact failure this guard exists for: silent acceptance
+        # of a wrong register. Do NOT mark this confirmed, and do not assume
+        # any other register in the DX5 II map applies here. The protocol
+        # needs establishing on its own terms -- most likely by capturing what
+        # Topping Tune sends, since the vendor app does drive this model.
         #
         # And one documented difference already argues against assuming it.
         # The DX5 II's volumeStep is a global half_db/one_db choice. On the
@@ -698,14 +708,27 @@ def cmd_vol(args):
     # only grants one -- and it takes a device KEY, not a Device instance.
     key = getattr(args, "device", None) or "dx5ii"
     step_db = 0.5
-    if not args.dry_run:
+    if getattr(args, "vol_step", None):
+        # Explicit override. Needed because the settings READ is model-specific
+        # and can fail on a device whose WRITE path may still be fine: a D90 III
+        # returns no settings records to the DX5 II read protocol (measured
+        # 2026-08-28), which blocked the very write test that would establish
+        # whether its register map matches. Its manual documents the step
+        # directly -- fixed 0.5 dB above -50 dB -- so the number does not have
+        # to be discovered by reading the device.
+        step_db = float(args.vol_step)
+    elif not args.dry_run:
         try:
             import devstate  # local: devstate imports this module
             step_db = 1.0 if devstate.read_settings(key)[32] == 1 else 0.5
         except Exception as e:                      # noqa: BLE001 - deliberate
             # Refuse rather than guess: a wrong scale silently doubles or
             # halves every level on a headphone amp.
-            sys.exit(f"cannot read volumeStep to determine the dB scale: {e}")
+            sys.exit(
+                f"cannot read volumeStep to determine the dB scale: {e}\n"
+                "If this model's step is documented, pass it explicitly: "
+                "--vol-step 0.5"
+            )
     steps = int(round(-db / step_db))
     actual = -steps * step_db
     # Guard before anything is opened or sent.
@@ -807,6 +830,10 @@ def main():
         description="Local control for Topping DACs over USB HID.")
     p.add_argument("--device", default="dx5ii", choices=sorted(DEVICES),
                    help="which model to talk to (default: dx5ii)")
+    p.add_argument("--vol-step", choices=("0.5", "1.0"),
+                   help="dB per raw volume step, instead of reading it from "
+                        "the device. For models whose settings read is not "
+                        "supported but whose step is documented.")
     p.add_argument("--unverified", action="store_true",
                    help="allow writes to a device whose register map is "
                         "unverified. You are asserting you will watch the "
