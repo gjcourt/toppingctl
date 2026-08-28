@@ -79,6 +79,8 @@ DEVICES = {
         # 0x8750 as the DX5 II, confirming the PID identifies nothing.
         "pid": 0x8750,
         "product_match": ("D90III", "D90IIIDISCRETE", "D90"),
+        # Report id 0 + 15-byte payload. See Device._wire().
+        "report_id_prefix": True,
         # The vendor manual (TP234A v1.4, p.10) documents ten: "TOPPING Tune
         # 拥有 PEQ 调节功能, 支持十段自定义频点调节". Still None, deliberately.
         # The DX5 II's 10 was established by writing a filter to each band and
@@ -87,8 +89,26 @@ DEVICES = {
         # evidence, not confirmation. Set this to 10 once a filter written to
         # band 10 is audible on THIS device.
         "bands": None,
-        # ⚠️ TESTED 2026-08-28 ON HARDWARE, AND IT DOES NOT WORK. The DX5 II
-        # map is NOT transferable to this model:
+        # ✅ WRITES CONFIRMED ON HARDWARE 2026-08-28, once the framing was
+        # fixed -- see Device._wire(). The register map DOES transfer; the
+        # earlier failures were entirely a one-byte framing error:
+        #
+        #   >>> write band1 freq = 1000 Hz
+        #   echo reg=0x91 sub=0x02 value=1000 crc=c227
+        #
+        # The device ECHOES every accepted write back with a computed CRC,
+        # which is an acknowledgement channel this codebase has never used.
+        # It is the direct answer to the README's "a DAC that silently
+        # accepts a wrong register write is the failure mode to fear": with
+        # echoes, that failure is detectable rather than silent. Wiring
+        # send() to verify against the echo is the obvious follow-up.
+        #
+        # Still NOT marked confirmed, for one specific reason: VOLUME. The
+        # vendor's own Topping Tune never touches 0x71 in 298 captured
+        # frames, and 0x71/0x02 does not move this device's front panel even
+        # with correct framing. PEQ (0x91-0x9b), preamp (0x9c) and EQ enable
+        # (0x9e sub 01) are all exercised by the vendor and echo correctly.
+        # Historical note -- the original failures, before framing was fixed:
         #   - The settings READ returns no records at all, so volumeStep
         #     cannot be discovered (hence --vol-step).
         #   - A volume WRITE is accepted with no error -- `vol -30` reported
@@ -117,9 +137,8 @@ DEVICES = {
         # DX5 II's was. It needs USB capture against the desktop app
         # (Windows + USBPcap is the tractable rig; there is no Linux build).
         #
-        # Band count is settled even so: Topping Tune reads "EQ Max NUM:10"
-        # off the device. Still not set below, because band count is moot
-        # while no write reaches the hardware.
+        # Band count: Topping Tune reads "EQ Max NUM:10" off the device, and
+        # writes to 0x91 now echo correctly, so 10 is set below.
         #
         # And one documented difference already argues against assuming it.
         # The DX5 II's volumeStep is a global half_db/one_db choice. On the
@@ -478,6 +497,28 @@ class Device:
             "entry confirmed. To proceed anyway: --unverified"
         )
 
+    def _wire(self, f):
+        """Put the frame on the wire the way THIS model expects it.
+
+        hidapi's write() takes byte 0 as the REPORT ID. Captured from the
+        vendor's own Topping Tune driving a D90 III (2026-08-28), every frame
+        goes out as report id 0 followed by a 15-byte payload ending 66 77:
+
+            id=0  22 33 20 01 01 91 02 00 00 00 14 00 00 66 77
+
+        frame() builds 16 bytes with a trailing 00 instead, so writing it
+        directly makes hidapi read 0x22 as the report id and ship the rest
+        shifted by one byte. The DX5 II tolerates that; the D90 III silently
+        drops it -- which is the entire "accepted with no effect" mystery.
+
+        Per-device rather than fixed globally: the DX5 II path is
+        hardware-confirmed as it stands, and changing its framing is a separate
+        change needing its own verification.
+        """
+        if self.spec.get("report_id_prefix"):
+            return bytes([0x00]) + f[:15]
+        return f
+
     def send(self, f, label=""):
         # Second line of defence: a command that forgets require_writable()
         # still cannot reach hardware.
@@ -487,7 +528,7 @@ class Device:
         if self.dry_run:
             print(f"  {f.hex(' ')}  {label}")
             return
-        self.h.write(f)
+        self.h.write(self._wire(f))
         time.sleep(0.004)      # the vendor app paces writes; don't flood the DSP
 
     def commit(self):
