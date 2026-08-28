@@ -7,14 +7,21 @@ on:
     branches: [main]
 
 jobs:
-  lint-and-dryrun:
+  test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is not decoration: the audio nodes this tool runs on ship Debian
+        # bookworm's Python 3.11, and a PEP 701 f-string slipped in unnoticed
+        # because CI only ever tested the newest interpreter.
+        python-version: ['3.11', '3.14']
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.14'
+          python-version: ${{ matrix.python-version }}
 
       - name: Install hidapi
         run: |
@@ -38,3 +45,21 @@ jobs:
           ./smoke.py --dry-run
           ./probe.py 0x04 0 --dry-run
           ./setctl.py --list
+
+  # Branch protection requires a check named exactly `lint-and-dryrun`. A matrix
+  # renames its check runs to `lint-and-dryrun (3.11)` etc., so that required
+  # context would stop existing and every PR would be permanently unmergeable —
+  # which is precisely what happened when the matrix was first added.
+  #
+  # This gate keeps one stable context name that aggregates the matrix, so the
+  # protection rule needs no admin change and adding future interpreters cannot
+  # silently break merging again.
+  lint-and-dryrun:
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every matrix leg to have passed
+        run: |
+          echo "matrix result: ${{ needs.test.result }}"
+          test "${{ needs.test.result }}" = "success"
