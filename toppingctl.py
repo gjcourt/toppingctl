@@ -103,6 +103,17 @@ DEVICES = {
         # echoes, that failure is detectable rather than silent. Wiring
         # send() to verify against the echo is the obvious follow-up.
         #
+        # VOLUME IS NOT ON THIS INTERFACE AT ALL -- established 2026-08-28,
+        # not inferred. The device was moved from -0.5 dB to -20.0 dB on its
+        # front panel and the full state enumeration (74 field indices, via
+        # the 0x4a/idx query below) showed NO field tracking the change.
+        # Targeted probes of 0x71 with opcodes 0x20/0x21/0x2f and both b3
+        # forms return only the 0x11/0x13 PEQ stream. So this model's volume
+        # is knob/remote only: Topping Tune is a PEQ tool and the protocol it
+        # speaks carries PEQ, preamp, EQ-enable, firmware and sample rate --
+        # not volume. Host-side volume for a D90 III means the UAC2/ALSA
+        # mixer, which only exists on the USB input.
+        #
         # Still NOT marked confirmed, for one specific reason: VOLUME. The
         # vendor's own Topping Tune never touches 0x71 in 298 captured
         # frames, and 0x71/0x02 does not move this device's front panel even
