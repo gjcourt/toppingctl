@@ -21,9 +21,12 @@ only the DX5 II has been proven. See DEVICES and README "Adding a device".
 
 Add --dry-run to any command to print frames without sending them.
 
-IMPORTANT — THE DEVICE CANNOT BE READ.
-Reads return an echo, not state (see spec §3). So "current state" here means
-"what this tool last wrote", cached in ~/.toppingctl/state.json. Anything changed
+NOTE ON READING THE DEVICE.
+The device CAN be read: `readsettings.py` / `devstate.read_settings()` query it
+and return live state. (An earlier version of this file said reads were only an
+echo; that was superseded by the read work and is no longer true.) What is still
+cached in ~/.toppingctl/state.json is the PEQ band state, which the tool tracks
+locally because it is not read back. Anything changed
 via the front panel, the remote, or the vendor app is invisible to us and will
 make the cache stale. `apply` always writes every band, so a preset is still
 applied correctly regardless of cache accuracy.
@@ -534,12 +537,35 @@ def cmd_vol(args):
     db = args.db
     if not VOL_MIN_DB <= db <= VOL_MAX_DB:
         sys.exit(f"volume {db} dB out of range ({VOL_MIN_DB}..{VOL_MAX_DB})")
-    steps = int(round(-db * 2))          # attenuation, half-dB steps
-    actual = -steps / 2
+    # The raw unit is NOT fixed at half a dB: volumeStep (settings field 32)
+    # selects it. Measured on a DX5 II against the front panel, 2026-08-27:
+    #   half_db: raw 60 -> -30.0 dB          one_db: raw 25 -> -25.0 dB
+    # Assuming 0.5 while the device is on one_db sends TWICE the attenuation
+    # asked for -- `vol -30` lands at -60 dB. The error is always in the quiet
+    # direction, so it is not dangerous, but it is wrong and it makes the
+    # --force guard fire for levels that are not actually loud.
+    # Read the scale FIRST, and let that read close its own handle before the
+    # writer opens one. read_settings() calls open_checked() internally, so
+    # holding a Device open across it would mean two handles on a device that
+    # only grants one -- and it takes a device KEY, not a Device instance.
+    key = getattr(args, "device", None) or "dx5ii"
+    step_db = 0.5
+    if not args.dry_run:
+        try:
+            import devstate  # local: devstate imports this module
+            step_db = 1.0 if devstate.read_settings(key)[32] == 1 else 0.5
+        except Exception as e:                      # noqa: BLE001 - deliberate
+            # Refuse rather than guess: a wrong scale silently doubles or
+            # halves every level on a headphone amp.
+            sys.exit(f"cannot read volumeStep to determine the dB scale: {e}")
+    steps = int(round(-db / step_db))
+    actual = -steps * step_db
+    # Guard before anything is opened or sent.
     if db > VOL_WARN_DB and not args.force:
         sys.exit(f"{actual:+.1f} dB is loud — re-run with --force if you mean it")
     dev = Device(args.dry_run, getattr(args, "device", None))
-    dev.send(frame(REG_CTRL, SUB_VOLUME, steps), f"volume {actual:+.1f} dB")
+    dev.send(frame(REG_CTRL, SUB_VOLUME, steps),
+             f"volume {actual:+.1f} dB ({step_db} dB/step)")
     dev.commit()
     dev.close()
     if not args.dry_run:

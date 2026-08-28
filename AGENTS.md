@@ -14,7 +14,7 @@ If the two disagree, the spec was tested against hardware and this was not.
 
 - **`--dry-run` first, always.** It prints frames without sending them. Every
   command supports it.
-- **The device cannot be read.** Reads return an echo, not state. `show` reports
+- **The device can be read.** `readsettings.py` queries live state. (This line used to say the opposite; that predated the read work.) `show` reports
   what *this tool last wrote*, cached in `~/.toppingctl/state.json`. Anything
   changed from the front panel, remote, or vendor app is invisible and makes the
   cache stale.
