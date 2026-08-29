@@ -42,8 +42,9 @@ Anything reported `UNKNOWN` is *not* assumed compatible. Adding an entry to
 establishes that. The order that matters:
 
 1. `devices` to get the PID **and the USB product string**. The PID identifies
-   nothing — six models ship `0x8750` — so the product string is what the entry
-   matches on.
+   nothing — many models ship `0x8750`, and three are directly confirmed here
+   (DX5 II, D90 III Discrete, D30 Pro) with others reported — so the product
+   string is what the entry matches on.
 2. Add the entry with `"status": "unverified"` and `"bands": None`.
 3. `--dry-run` everything first and read the frames. Note `--dry-run` is a
    **global** flag: it goes *before* the subcommand.
@@ -67,16 +68,20 @@ if01  class=01 subclass=02 proto=20  snd-usb-audio   UAC2 AudioStreaming
 if02  class=fe subclass=01 proto=01  (no driver)     DFU, for firmware updates
 ```
 
-No class `03` interface, no `/dev/hidraw*`. `devices` reporting nothing for it is
-correct, not a fault — there is nothing to open. Volume on that model is UAC2
-only, i.e. the ALSA mixer.
+No class `03` interface, no `/dev/hidraw*`. **`devices` returning nothing for it
+is correct, not a fault** — `find_devices()` iterates `hid.enumerate()`, and a
+device with no HID interfaces never appears there at all. That is the point
+worth knowing: an empty result on something that is visibly a Topping DAC reads
+as a bug until you know the hardware has nothing to enumerate.
 
-That single PID therefore spans three different realities: a model with a
-confirmed vendor protocol (DX5 II), one with a protocol that is **not** the same
-(D90 III Discrete), and one with **no control interface whatsoever** (D30 Pro).
-It is the clearest argument for matching on the USB product string: keying on
-the PID would not merely pick the wrong register map here, it would try to open
-a HID interface that does not exist.
+Note this is *not* an argument about PID-versus-product-string matching. Such a
+device is filtered out before either matcher sees it. The argument for matching
+on the product string rests on models that DO expose HID and whose register maps
+differ — the DX5 II and the D90 III Discrete.
+
+Volume on the D30 Pro is the UAC2 mixer only, driven through ALSA
+(`amixer -c <n> sset 'D30 Pro' -16dB`). That is how it runs in production here,
+not an inference from the absent interfaces.
 
 **Vendor tooling is split by model, and the split is not intuitive.** As of
 2026-08-28 the browser app at `home.toppingaudio.com` drives **DX1 II and

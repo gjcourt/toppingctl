@@ -162,13 +162,6 @@ DEVICES = {
     },
 }
 
-# Known to share 0x152a/0x8750 and NOT be driveable, so an empty `devices`
-# result is not necessarily a fault:
-#   D30 Pro -- measured 2026-08-28, firmware 2.46. Exposes only UAC2
-#   AudioControl + AudioStreaming and a DFU interface; NO HID class interface
-#   and no /dev/hidraw node. Volume on that model is the ALSA mixer only.
-#   Deliberately absent from DEVICES: there is nothing here to drive.
-
 THESYCON_VID = 0x152A
 
 # --- protocol constants (see spec) ------------------------------------------
@@ -358,12 +351,22 @@ def _product_matches(spec, product_string):
 
 
 def find_devices():
-    """Enumerate every Thesycon-VID HID device, flagging which we know."""
+    """Enumerate every Thesycon-VID HID device, flagging which we know.
+
+    An EMPTY result is not necessarily a fault. This iterates hid.enumerate(),
+    so a DAC with no HID interfaces never appears here at all. Measured
+    2026-08-28: a D30 Pro (firmware 2.46) shares 0x152a/0x8750 with the DX5 II
+    and D90 III Discrete but exposes only UAC2 AudioControl, UAC2
+    AudioStreaming and a DFU interface -- no class 03 interface, no
+    /dev/hidraw node. It is deliberately absent from DEVICES because there is
+    nothing to drive; its volume is the ALSA mixer.
+    """
     found = []
     for d in hid.enumerate(THESYCON_VID, 0):
         # Match on the PRODUCT STRING, not the PID. Matching on PID alone
         # reported a D90 III Discrete as "known: dx5ii" -- measured 2026-08-28
-        # on real hardware -- because six Topping models share 0x8750. That
+        # on real hardware -- because many Topping models share 0x8750 (DX5 II,
+        # D90 III Discrete and D30 Pro confirmed here). That
         # inverted the safety default the README's step 1 depends on: an
         # unrecognised DAC appeared as an already-confirmed one, so following
         # the documented procedure walked straight past the guard.
