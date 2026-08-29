@@ -57,6 +57,27 @@ that is how you get through steps 3 and 4. Before this, adding an entry silently
 granted full write access to hardware nobody had tested, which is the opposite
 of what this procedure says it does.
 
+**Some Topping DACs on this VID/PID have no HID interface at all.** A **D30 Pro**
+enumerates as `152a:8750` — the same PID as the DX5 II and the D90 III Discrete
+— and exposes only:
+
+```
+if00  class=01 subclass=01 proto=20  snd-usb-audio   UAC2 AudioControl
+if01  class=01 subclass=02 proto=20  snd-usb-audio   UAC2 AudioStreaming
+if02  class=fe subclass=01 proto=01  (no driver)     DFU, for firmware updates
+```
+
+No class `03` interface, no `/dev/hidraw*`. `devices` reporting nothing for it is
+correct, not a fault — there is nothing to open. Volume on that model is UAC2
+only, i.e. the ALSA mixer.
+
+That single PID therefore spans three different realities: a model with a
+confirmed vendor protocol (DX5 II), one with a protocol that is **not** the same
+(D90 III Discrete), and one with **no control interface whatsoever** (D30 Pro).
+It is the clearest argument for matching on the USB product string: keying on
+the PID would not merely pick the wrong register map here, it would try to open
+a HID interface that does not exist.
+
 **Vendor tooling is split by model, and the split is not intuitive.** As of
 2026-08-28 the browser app at `home.toppingaudio.com` drives **DX1 II and
 DX5 II**; the desktop *Topping Tune* (V1.16) drives **D50 III, D90 III

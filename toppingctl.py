@@ -162,6 +162,13 @@ DEVICES = {
     },
 }
 
+# Known to share 0x152a/0x8750 and NOT be driveable, so an empty `devices`
+# result is not necessarily a fault:
+#   D30 Pro -- measured 2026-08-28, firmware 2.46. Exposes only UAC2
+#   AudioControl + AudioStreaming and a DFU interface; NO HID class interface
+#   and no /dev/hidraw node. Volume on that model is the ALSA mixer only.
+#   Deliberately absent from DEVICES: there is nothing here to drive.
+
 THESYCON_VID = 0x152A
 
 # --- protocol constants (see spec) ------------------------------------------
