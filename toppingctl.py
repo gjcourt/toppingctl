@@ -687,11 +687,10 @@ def load_state():
         with open(STATE_FILE) as fh:
             return json.load(fh)
     except (OSError, ValueError):
-        # No device in scope here to size this against with band_count(spec) --
-        # harmless, since every real write path (cmd_flat, cmd_apply) replaces
-        # "bands" wholesale with a list sized from the actual device before this
-        # default is ever read, and the off-by-default entries this over- or
-        # under-sizes are inert until then.
+        # Sized by the module constant because no device is in scope here.
+        # vol/preamp/gain save this default as-is and show/dump read it; flat
+        # and apply resize it per device. Harmless while every model in
+        # DEVICES has 10 bands -- revisit when one doesn't.
         return {"bands": [dict(DEFAULT_BAND) for _ in range(BAND_COUNT)],
                 "volume_db": None, "gain": None, "source": "defaults (no cache yet)"}
 
@@ -1161,6 +1160,7 @@ def cmd_power(args):
 
 def cmd_show(args):
     spec = DEVICES[getattr(args, "device", None) or "dx5ii"]
+    n = band_count(spec)  # refuse before printing anything, like flat/apply
     st = load_state()
     print(f"last written by toppingctl (source: {st.get('source')})")
     print("the device cannot be queried — this is a cache, not a read.\n")
@@ -1172,13 +1172,15 @@ def cmd_show(args):
         print(f"  gain    {'on' if st['gain'] else 'off'}")
     print()
     active = 0
-    for i, b in enumerate(st["bands"], 1):
+    # Sliced like cmd_dump: a cache written before the 11th register was kept
+    # off the preset can hold more entries than the device has usable bands.
+    for i, b in enumerate(st["bands"][:n], 1):
         if not b["on"]:
             continue
         active += 1
         print(f"  band {i:2d}  {b['type']}  {b['freq']:>7.0f} Hz  "
               f"{b['gain']:+5.1f} dB  Q {b['q']:.3f}")
-    print(f"  ({active} of {band_count(spec)} bands active)")
+    print(f"  ({active} of {n} bands active)")
 
 
 def cmd_dump(args):

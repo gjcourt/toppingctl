@@ -41,6 +41,8 @@ Sequence: `devices` for the PID → entry with `"status": "unverified"` →
 - **Apache-2.0**, © George Courtsunis.
 - **`ruff check`** is the lint gate; CI runs it plus dry-run exercises of every
   frame builder, so CI needs no hardware.
+- `python3 -m unittest test_offline` runs offline regression tests (no
+  hardware; needs `hid` importable). CI does not run them yet.
 - Branch and PR for every change. Never commit to `main`.
 - Presets in `presets/`, third-party measurement data in `measurements/` —
   attribute the source in the file or its README.
