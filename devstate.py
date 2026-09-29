@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Read the device's settings as a dict. Shared by readsettings.py and set."""
+
 import time
 
 from toppingctl import frame, open_checked
@@ -23,6 +24,7 @@ def _frames(h, secs):
     """Collect 22 33 protocol frames for secs; skips the idle all-zero
     reports and the device's own 1 Hz 0x111a heartbeat tick."""
     import time as _t
+
     out, t0 = [], _t.time()
     while _t.time() - t0 < secs:
         try:
@@ -101,12 +103,18 @@ def dx1_state(dev_key="dx1ii"):
         blk = dx1_read_block(h)
         regs = {}
         for reg, sub, name in [
-            (0x71, 0x00, "state"), (0x79, 0x00, "autoStandby"),
-            (0x7D, 0x00, "autoScreenOff"), (0x81, 0x0B, "analogBalance"),
-            (0x81, 0x0C, "optBalance"), (0x81, 0x0E, "remoteArrow"),
-            (0x81, 0x0F, "remoteMute"), (0x82, 0x00, "knobSingle"),
-            (0x83, 0x00, "knobDouble"), (0x84, 0x00, "knobEventCaps"),
-            (0x12, 0x04, "eqEnableState"), (0x12, 0x06, "eqCurrentConfig"),
+            (0x71, 0x00, "state"),
+            (0x79, 0x00, "autoStandby"),
+            (0x7D, 0x00, "autoScreenOff"),
+            (0x81, 0x0B, "analogBalance"),
+            (0x81, 0x0C, "optBalance"),
+            (0x81, 0x0E, "remoteArrow"),
+            (0x81, 0x0F, "remoteMute"),
+            (0x82, 0x00, "knobSingle"),
+            (0x83, 0x00, "knobDouble"),
+            (0x84, 0x00, "knobEventCaps"),
+            (0x12, 0x04, "eqEnableState"),
+            (0x12, 0x06, "eqCurrentConfig"),
         ]:
             regs[name] = dx1_query(h, reg, sub)
         configs = dx1_read_configs(h)
@@ -139,8 +147,14 @@ def read_settings(dev_key="dx5ii", secs=2.0):
                 # zero-length read. It is noise, not a failure -- the device
                 # streams empty reports when it has nothing to say.
                 continue
-            if b and len(b) >= 15 and b[0] == 0x22 and b[1] == 0x33 \
-                    and b[5] == GET_SETTINGS[0] and b[6] == GET_SETTINGS[1]:
+            if (
+                b
+                and len(b) >= 15
+                and b[0] == 0x22
+                and b[1] == 0x33
+                and b[5] == GET_SETTINGS[0]
+                and b[6] == GET_SETTINGS[1]
+            ):
                 rec[b[4]] = int.from_bytes(bytes(b[7:11]), "big")
         if not rec:
             raise RuntimeError(

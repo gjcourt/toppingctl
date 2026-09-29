@@ -77,8 +77,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sleep", action="store_true", help="test power-off at the end")
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--pause", type=float, default=2.5,
-                    help="seconds between steps, for observation")
+    ap.add_argument(
+        "--pause", type=float, default=2.5, help="seconds between steps, for observation"
+    )
     args = ap.parse_args()
 
     print("toppingctl smoke test")
