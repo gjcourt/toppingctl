@@ -22,6 +22,57 @@ replaced guesses with the vendor's own values. Full spec:
 | Model | PID | Status |
 |---|---|---|
 | **Topping DX5 II** | `0x8750` | ✅ **confirmed** — driven on real hardware |
+| **Topping DX1 II** | `0x8750` | community-contributed — unverified |
+
+The DX1 II speaks a **different protocol family** ("dx1 next", reverse-engineered
+from the vendor web app's bundle the same way as the DX5 II map, then driven on
+one contributor's unit). It is *not* a copy of the DX5 II map on the same registers:
+
+- **Framing**: writes need the report-id-0 prefix (like the D90 III); unprefixed
+  frames are silently dropped.
+- **Volume and mute live in a 12-frame state block at `0x810a`**, not at
+  `0x7102`/`0x7103` — writing the DX5 II registers there is silently ignored.
+  Frame 5 is the knob's "all outputs" volume, frames 3/4 the hp/lo memories,
+  frame 7 the mute bitmask. Volume raw is `(dB + 99) × 10`, 0–990, 1 dB steps
+  below −10 dB and 0.5 dB above.
+- **Other settings are separate registers**: gain `0x7500`, PCM filter `0x7300`,
+  input `0x7b00`, standby `0x7100` (1=working, 2=standby), brightness `0x7a00`,
+  auto-standby `0x7900`, display mode `0x8109`.
+- **PEQ is the same register map as the DX5 II** (`0x91`–`0x9b`, preamp `0x9c`,
+  same sub-indices) and all 11 registers store values here — but the registers
+  address **the active slot of 3 stored configs**, selected with `0x110e`
+  (data = slot index 0..2, `0xffffffff` = EQ off). `apply`/`flat` therefore
+  replace the curve stored in the active slot, not a global PEQ. Report-only
+  registers `0x1204`/`0x1206` are read-only; writing them does nothing.
+- There is **no `0x710c` GetSettings**, and reads are *restricted*: a readNack
+  is only a read for the registers the vendor's own query builder allows
+  (`0x7100`, `0x7900`, `0x7d00`, `0x810b`, `0x810c`, `0x810a`, `0x810d`,
+  `0x810e`, `0x810f`, `0x8200`, `0x8300`, `0x8400`, `0x1204`, `0x1206`) plus
+  the 3-slot PEQ dump `0x1106`. For anything else — gain, filter,
+  brightness, input, display mode among them —
+  **the device treats an incoming readNack as a write of the data field**:
+  probing with data=0 resets the setting while "reading" it. Those registers
+  are write-only from the host; their state arrives as an unsolicited push
+  after a change. Found on hardware the expensive way: a register
+  sweep meant to *read* gain pulled the user's front-panel high-gain back down
+  to low. `./readsettings.py --device dx1ii` stays inside the safe set.
+  Verification channel for the write-only registers: the device pushes the
+  new value after accepting a write, and the front panel confirms it.
+
+New commands (DX1 II): `mute off|analog|opt|both`, `input usb|opt`, `filter f1..f8`,
+`eq on|off|1-3`, and `vol --target all|hp|lo`.
+
+⚠️ **If writes seem to do nothing, close the vendor web app first.** While
+home.toppingaudio.com is connected it re-asserts its own state over the same
+HID interface and reverts your writes within about a second — the device is
+fine, you are just fighting another controller for it. Observed repeatedly on
+hardware: mute flipped back off, balance writes undone, volume stomped.
+
+Two further hardware notes from the verification session: the device acks
+writes with an echo frame, but the echo is a receipt, not proof of application —
+read-back is the only truth. And if the screen is off the state word reads 11
+instead of 1 and the panel needs a knob press (or a `power on`) before it
+behaves again.
 
 ⚠️ **Only the DX5 II has been proven.** Other Topping models are *likely*
 compatible — the vendor drives its whole range from one web app, which is
@@ -97,8 +148,13 @@ bundle — it is a Qt/C++ binary — so their protocol needs USB capture instead
 
 **`bands` is per-device and is not guessed.** `None` means the count was never
 established, and PEQ commands refuse rather than falling back to the DX5 II's
-10. That number was found by writing a filter to each band and listening — it
-also caught an eleventh register that accepts writes and drives nothing.
+10. The DX5 II's 10 was found by writing a filter to each band and listening —
+it also caught an eleventh register that accepts writes and drives nothing.
+The DX1 II's 10 was found the same way on a loopback (balanced output into an
+audio interface's line-in): a PK 1000 Hz −12 dB filter measured −7.7 dB from
+band 10 and +0.0 dB from band 11. Every register still stores values — each
+took a distinct probe value that showed up in the device's own config dump —
+but the eleventh accepts writes and drives nothing here too.
 
 **A DAC that silently accepts a wrong register write is the failure mode to
 fear**, which is why step 4 uses a control with visible feedback.
@@ -114,12 +170,31 @@ Q 2.0) was then displayed correctly by Topping's own web app, together with a
 volume this tool had set. An independent client wrote it; the vendor software
 read it back. That is as strong as verification gets short of a measurement rig.
 
+**The DX1 II entry stays unverified**, so those writes need `--unverified`. One unit was checked with each register class matched to a channel that
+cannot lie. Volume: front-panel-confirmed by a human, plus read-back through
+the `0x810a` block. Mute: block read-back and the panel's mute icon. PEQ (band
+registers, preamp, slot select, EQ on/off): byte-verified through the device's
+own config dump — every one of the 11 band registers (L and R) took a distinct
+probe value that showed up in the dump, presets applied and flattened, and the
+original curve restored byte-for-byte from a backup afterwards. The
+write-only settings registers (gain, filter, input, brightness, display mode)
+cannot be read from the host at all — a readNack writes them — so gain, filter,
+input switching, EQ slot and standby/wake were each panel-verified by a human
+while the tool drove them. What is *not* claimed: any register outside the map
+above. Band 11's silence was measured afterwards with a loopback (the
+balanced output into an audio interface's line-in): inert, as on the DX5 II.
+
 ## Install
 
 ```bash
-brew install hidapi
 pip3 install hid
 ```
+
+The `hid` package is a thin ctypes wrapper and needs the hidapi **shared
+library** next to it. macOS: `brew install hidapi`. Windows: there is no
+package for this — drop the official `hidapi.dll` (x64) from the
+[libusb/hidapi releases](https://github.com/libusb/hidapi/releases) into your
+interpreter's directory (or anywhere on `PATH`).
 
 macOS may require granting your terminal **Input Monitoring**
 (System Settings → Privacy & Security).
@@ -136,6 +211,27 @@ macOS may require granting your terminal **Input Monitoring**
 ./toppingctl.py dump preset.json      # export state as JSON
 ```
 
+DX1 II (`--device dx1ii`). The entry is unverified, so a live write needs
+`--unverified`. `--dry-run` and `readsettings.py` do not.
+
+```bash
+./toppingctl.py --device dx1ii --unverified vol -30              # knob volume ("all outputs")
+./toppingctl.py --device dx1ii --unverified vol -30 --target hp  # or the hp/lo memories
+./toppingctl.py --device dx1ii --unverified mute off             # neither output
+./toppingctl.py --device dx1ii --unverified mute analog          # hp/lo only
+./toppingctl.py --device dx1ii --unverified mute opt             # optical only
+./toppingctl.py --device dx1ii --unverified mute both
+./toppingctl.py --device dx1ii --unverified gain on
+./toppingctl.py --device dx1ii --unverified input usb            # or: opt
+./toppingctl.py --device dx1ii --unverified filter f3            # PCM filter f1..f8
+./toppingctl.py --device dx1ii --unverified eq off               # EQ on | off | 1-3 (select slot)
+./toppingctl.py --device dx1ii --unverified power off            # standby (wake: power on)
+./toppingctl.py --device dx1ii --unverified apply e3.txt         # PEQ -> the ACTIVE slot of 3
+./readsettings.py --device dx1ii                                 # full live state, decoded
+```
+
+Note `--dry-run` is a **global** flag: it goes *before* the subcommand.
+
 `--dry-run` prints the frames without sending them. Use it first.
 
 ## Presets
@@ -149,11 +245,12 @@ Filter 2: ON PK Fc 1200 Hz Gain -3.2 dB Q 1.41
 ```
 
 Only **PK**, **LS** and **HS** are supported — the three filter types confirmed
-on this device. Any other type is **reported, not silently dropped**, because a
-missing filter yields a wrong curve that still sounds plausible.
+on these devices. Any other type is **reported, not silently dropped**, because
+a missing filter yields a wrong curve that still sounds plausible.
 
-The device has **10 usable bands**; presets with more are rejected rather than
-truncated.
+**On the DX5 II** the device has **10 usable bands**; presets with more are
+rejected rather than truncated. Value limits are the DX5 II's: 10 Hz–22 kHz,
+±40 dB, Q 0.01–100.
 
 Eleven band registers exist (`0x91`–`0x9b`) but **`0x9b` does nothing**.
 
@@ -174,6 +271,15 @@ and the vendor UI's "BANDS n / 10" reports the hardware correctly.
 
 All eleven registers are still written, so a stale band 11 left behind by the
 vendor app is cleared rather than left underneath your preset.
+
+**On the DX1 II** the same preset format applies, with different numbers: **11
+band registers, all storing values** (verified in the device's config dump),
+but **10 treated as usable** — band 11 has not been listening-tested and gets
+the DX5 II's `0x9b` treatment (written and cleared, not counted). The
+firmware's own clamps are tighter — 20 Hz–20 kHz, **±12 dB**, Q 0.1–20 — so
+presets beyond those are rejected instead of silently clamped into a different
+curve. The preset lands in the **active PEQ slot** of three, replacing the
+curve stored there — select the slot first with `eq 1-3`.
 
 ## Two things to know
 

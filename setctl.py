@@ -67,6 +67,8 @@ def main():
     ap.add_argument("value", nargs="?")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--device", default="dx5ii")
+    ap.add_argument("--unverified", action="store_true")
     a = ap.parse_args()
 
     if a.list or not a.field:
@@ -97,7 +99,7 @@ def main():
     else:
         raw = int(a.value)
 
-    state = devstate.by_name()
+    state = devstate.by_name(a.device)
     if field not in state:
         sys.exit(
             f"{field} is not reported by this device -- most likely a firmware "
@@ -114,14 +116,14 @@ def main():
     note = "" if conf == "vendor" else f"  [mapping inferred, confidence: {conf}]"
     print(f"  via {vendor_name} (0x{cmd:04x}){note}")
 
-    dev = Device(a.dry_run, None)
+    dev = Device(a.dry_run, a.device, allow_unverified=a.unverified)
     dev.send(frame(cmd >> 8, cmd & 0xFF, raw), f"{vendor_name} = {raw}")
     dev.commit()
     dev.close()
     if a.dry_run:
         return
 
-    after = devstate.by_name().get(field)
+    after = devstate.by_name(a.device).get(field)
     if after == (raw & 0xFFFFFFFF):
         print(f"  VERIFIED: device reports {devstate.label(field, after)}")
     else:
