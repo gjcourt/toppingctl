@@ -10,6 +10,13 @@ Reverse-engineered and hardware-confirmed on a DX5 II. Other Topping models very
 likely share the register map -- the vendor drives them from one web app -- but
 only the DX5 II has been proven. See DEVICES and README "Adding a device".
 
+The Topping DX1 II is the exception that proves the rule: it shares the PID and
+the PEQ registers but speaks a different "dx1 next" protocol family for
+everything else (volume/mute live in a 12-frame 0x810a state block; the DX5 II
+volume/mute registers are silently ignored). The entry stays unverified:
+that flag is the write gate, so a live write needs --unverified. See
+DEVICES["dx1ii"] and README "Which devices".
+
     toppingctl apply <autoeq.txt|preset.json>   write a PEQ preset
     toppingctl dump [file]                      write current known state to JSON
     toppingctl show                             print current known state
@@ -160,6 +167,56 @@ DEVICES = {
         # marking confirmed.
         "status": "unverified",
     },
+    "dx1ii": {
+        "name": "Topping DX1 II",
+        "vid": 0x152A,
+        # Same shared PID as the DX5 II / D90 III Discrete / D30 Pro; the
+        # product string is what identifies it.
+        "pid": 0x8750,
+        "product_match": ("DX1II", "DX1"),
+        # The DX1 II does NOT accept the report-id-less framing the DX5 II
+        # tolerates: plain frames are dropped silently, exactly like the
+        # D90 III -- unprefixed GetSettings produced nothing, the same frame
+        # report-id-prefixed was answered in ~12 ms.
+        "report_id_prefix": True,
+        # A separate protocol family from the DX5 II map. The vendor web app
+        # drives it through "dx1 next" registers: settings live at 0x71xx/
+        # 0x73xx/0x75xx/... and volume+mute live in a 12-frame output-state
+        # block at 0x810a -- NOT at 0x7102/0x7103, whose dx5ii meanings this
+        # firmware silently ignores. The PEQ band registers (0x91-0x9b + 0x9c
+        # preamp) ARE shared with the DX5 II and address the ACTIVE config
+        # slot of 3 stored slots, selected with 0x110e. See the command
+        # comments below for the full map.
+        #
+        # ⚠️ READS ARE WRITE-ONLY-ADJACENT HERE. A readNack is only a read for
+        # the registers the vendor's own query builder allows (0x7100, 0x7900,
+        # 0x7d00, 0x810b, 0x810c, 0x810a, 0x810d, 0x810e, 0x810f, 0x8200,
+        # 0x8300, 0x8400, 0x1204, 0x1206) plus the 3-slot PEQ dump 0x1106.
+        # For anything else -- gain, filter,
+        # brightness, input, display mode among them -- the device treats the
+        # incoming readNack as a WRITE of the data field: probing with
+        # data=0 resets the user's settings while "reading" -- a register
+        # sweep to "read" gain pulled the user's front-panel high-gain back
+        # down to low.
+        # These registers are written and their state arrives as an
+        # unsolicited push; they are never probed with readNack.
+        "protocol": "dx1",
+        # 11 band registers exist here exactly as on the DX5 II: every one
+        # stores values (each band L+R took a distinct probe value that
+        # appeared in the device's 0x1106 config dump). But storage is not
+        # signal: a PK 1000 Hz -12 dB Q2 notch in band 10 showed -7.7 dB at
+        # 1 kHz on a loopback rig (balanced out -> audio interface line-in),
+        # while the identical filter in band 11 showed +0.0 dB and the
+        # all-off restore also +0.0 dB. Usable bands are 10, same as the
+        # DX5 II. The commit path still writes and clears all 11 registers,
+        # so a stale band 11 is cleared underneath a preset.
+        "bands": 10,
+        # Driven on one unit (firmware 3.07, protocol v2), but status stays
+        # unverified. It is the write gate, not a label: "confirmed" lets
+        # setctl.py and probe.py send DX5 II registers here, and neither
+        # knows this protocol exists. Owners pass --unverified once.
+        "status": "unverified",
+    },
 }
 
 THESYCON_VID = 0x152A
@@ -218,6 +275,69 @@ def band_count(spec):
             "Do the same here before using PEQ, then set \"bands\" in DEVICES."
         )
     return n
+
+# --- DX1 II protocol (measured on hardware; vendor names from the
+# --- home.toppingaudio.com bundle, same provenance as vendor_commands.py) ----
+#
+# The DX1 II shares the 22 33 frame shape and the 0x91-0x9c PEQ registers with
+# the DX5 II, and almost nothing else. Its settings live in a different
+# register space ("dx1 next"), its volume and mute live in a 12-frame state
+# block instead of single registers, and writes need the report-id-0 framing
+# the D90 III needs (see Device._wire). The vendor splits its single-frame
+# traffic from block traffic by byte 3: 0x01 = totalFrameLen 1, here 12.
+DX1_OUT_STATE = 0x810A          # the output-state block, 12 frames
+DX1_BLOCK_LEN = 12
+# Frame indices inside the 0x810a block (1-based, as the device numbers them):
+#   1 protocol/version, 2 state word (output mask, volumeLinked, peqRoute),
+#   3 hpVolume, 4 loVolume, 5 loHpVolume, 6 optVolume, 7 mute bitmask,
+#   8-12 fixed-restore snapshot. Writing frame n updates that one field; the
+#   device acks by pushing the changed frame back.
+DX1_F_HP_VOL, DX1_F_LO_VOL, DX1_F_LOHP_VOL, DX1_F_OPT_VOL = 3, 4, 5, 6
+DX1_F_MUTE = 7                  # bit0 = analog muted, bit1 = opt muted
+# Four stored states of that bitmask. "on"/"off" cannot name them: writing 1
+# mutes analog and clears optical.
+DX1_MUTE = {"off": 0, "analog": 1, "opt": 2, "both": 3}
+DX1_REG_STATE = (0x71, 0x00)    # 1 = working, 2 = standby (also pushed live)
+DX1_REG_FILTER = (0x73, 0x00)   # PCM filter, 0..7
+DX1_REG_HIGH_GAIN = (0x75, 0x00)  # headphone gain, 0/1
+DX1_REG_INPUT = (0x7B, 0x00)    # input, 0 = usb, 1 = optical
+DX1_REG_SWITCH_CFG = (0x11, 0x0E)  # select PEQ slot 0..2; 0xffffffff = EQ off
+DX1_REG_QUERY_CFG = (0x12, 0x06)   # read back active PEQ slot (0..2)
+DX1_REG_QUERY_ENABLE = (0x12, 0x04)  # read back EQ enable bits (bit1 = on)
+
+# Volume raw is (dB + 99) * 10, 0..990. Below -10 dB the scale is 1 dB/step
+# (multiples of 10); above -10 it is 0.5 dB (multiples of 5). Decoded from the
+# vendor bundle's dx1DbToRaw and confirmed on hardware: raw 540 showed -45.0
+# on the front panel.
+DX1_VOL_RAW_MAX = 990
+
+
+def dx1_db_to_raw(db):
+    v = max(-99.0, min(0.0, db))
+    r = max(0, min(DX1_VOL_RAW_MAX, round((v + 99.0) * 10)))
+    if r <= 890:
+        r = 10 * round(r / 10)
+    elif r < 895:
+        r = 890
+    else:
+        r = 895 + 5 * round((r - 895) / 5)
+    return int(r)
+
+
+def dx1_raw_to_db(raw):
+    return max(0, min(DX1_VOL_RAW_MAX, int(raw))) / 10 - 99
+
+
+def dx1_block_frame(cur, data, opcode=0x20):
+    """One frame of the 0x810a output-state block: 15 bytes, report id added
+    by _wire(). The device pushes the whole block back on change, which is the
+    read channel for volume and mute -- there is no 0x710c GetSettings here."""
+    f = [0x22, 0x33, opcode, DX1_BLOCK_LEN, cur,
+         DX1_OUT_STATE >> 8, DX1_OUT_STATE & 0xFF,
+         (data >> 24) & 0xFF, (data >> 16) & 0xFF, (data >> 8) & 0xFF, data & 0xFF,
+         0, 0, 0x66, 0x77]
+    return bytes(f)
+
 
 # Per-band sub-indices. 01-05 left channel, 06-0a right.
 SUB_TYPE, SUB_FREQ, SUB_GAIN_, SUB_Q, SUB_ON = 1, 2, 3, 4, 5
@@ -621,24 +741,34 @@ def load_preset(path):
     return parse_autoeq(text)
 
 
-def validate(bands, max_bands=BAND_COUNT):
+def validate(bands, max_bands=BAND_COUNT, spec=None):
     """Reject nonsense before it reaches the DSP.
 
     max_bands is per-device: a model's usable band count is a measured property,
     not a constant. Defaults to the DX5 II's 10 so existing callers are
     unchanged.
+
+    The value ranges are per-device too, from the vendor app's own clamps: the
+    DX1 II accepts 20 Hz-20 kHz, +/-12 dB and Q 0.1-20 per band -- a preset
+    beyond those would be silently clamped by the firmware into a curve other
+    than the one on paper, which is exactly the wrong-curve failure this
+    function exists to prevent. The DX5 II keeps its original, wider ranges.
     """
+    dx1 = spec is not None and spec.get("protocol") == "dx1"
     errs = []
     if len(bands) > max_bands:
         errs.append(f"{len(bands)} filters but this device has {max_bands} usable bands")
     for i, b in enumerate(bands, 1):
         if b["type"] not in FILTER_TYPES:
             errs.append(f"filter {i}: unsupported type {b['type']}")
-        if not 10 <= b["freq"] <= 22000:
+        freq_lo, freq_hi = (20, 20000) if dx1 else (10, 22000)
+        gain_lo, gain_hi = (-12, 12) if dx1 else (-40, 40)
+        q_lo, q_hi = (0.1, 20) if dx1 else (0.01, 100)
+        if not freq_lo <= b["freq"] <= freq_hi:
             errs.append(f"filter {i}: frequency {b['freq']} Hz out of range")
-        if not -40 <= b["gain"] <= 40:
+        if not gain_lo <= b["gain"] <= gain_hi:
             errs.append(f"filter {i}: gain {b['gain']} dB out of range")
-        if not 0.01 <= b["q"] <= 100:
+        if not q_lo <= b["q"] <= q_hi:
             errs.append(f"filter {i}: Q {b['q']} out of range")
     return errs
 
@@ -673,18 +803,22 @@ def assert_writable(args):
 
 def cmd_apply(args):
     assert_writable(args)
+    spec = DEVICES[getattr(args, "device", None) or "dx5ii"]
+    dx1 = spec.get("protocol") == "dx1"
     bands, preamp, skipped = load_preset(args.file)
     if not bands:
         sys.exit(f"no usable filters found in {args.file}")
     # Resolve the band count for THIS device before validating against it.
     # Exits if the model's band count was never established, rather than
     # silently validating against the DX5 II's 10.
-    errs = validate(bands, band_count(DEVICES[getattr(args, "device", None) or "dx5ii"]))
+    errs = validate(bands, band_count(spec), spec)
     if errs:
         sys.exit("preset rejected:\n  " + "\n  ".join(errs))
 
-    # Pad to REG_COUNT, not BAND_COUNT: band 11 is inert but still gets an
-    # explicit disable so nothing stale survives underneath the preset.
+    # Pad to REG_COUNT, not BAND_COUNT: band 11 is inert on the DX5 II but
+    # still gets an explicit disable so nothing stale survives underneath the
+    # preset. On the DX1 II all 11 registers are real storage (verified in the
+    # config dump), so the pad is equally meaningful there.
     padded = bands + [dict(DEFAULT_BAND) for _ in range(REG_COUNT - len(bands))]
 
     print(f"applying {len(bands)} filter(s) from {os.path.basename(args.file)}")
@@ -692,8 +826,21 @@ def cmd_apply(args):
         state = "" if b["on"] else "  (off)"
         print(f"  {i:2d}. {b['type']}  {b['freq']:>7.0f} Hz  "
               f"{b['gain']:+5.1f} dB  Q {b['q']:.3f}{state}")
-    if len(padded) > len(bands):
-        print(f"  {len(padded) - len(bands)} unused band(s) disabled")
+    # The 11th register is cleared on the wire so a stale band cannot linger,
+    # but it is not a band the user can dump and re-apply. The cache keeps
+    # only the usable count; validate() rejects anything longer.
+    stored = padded[:band_count(spec)]
+    unused = len(stored) - len(bands)
+    if unused:
+        print(f"  {unused} unused band(s) disabled")
+
+    if dx1:
+        # The 0x91-0x9b registers address whichever of the 3 stored PEQ slots
+        # is active. There is no global PEQ on this model to overwrite: the
+        # preset lands IN that slot, replacing whatever curve it held.
+        print("\n  DX1 II: PEQ writes go to the ACTIVE config slot (one of 3).")
+        print("  The curve currently stored there is replaced. Select a")
+        print("  different slot first with:  ./toppingctl.py --device dx1ii --unverified eq <1-3>")
 
     if skipped:
         print(f"\n  SKIPPED unsupported filter types: {', '.join(skipped)}")
@@ -718,29 +865,41 @@ def cmd_apply(args):
     for i, b in enumerate(padded):
         for f in band_frames(i, b):
             dev.send(f, f"band{i+1} {b['type']}")
-    dev.commit()
+    if dx1:
+        # Measured on hardware: DX1 II band/preamp writes land immediately in
+        # the active slot -- no heartbeat/commit frame participates. Sending
+        # the DX5 II commit (0x7134) is harmless but proves nothing here.
+        pass
+    else:
+        dev.commit()
     dev.close()
 
     if not args.dry_run:
         st = load_state()
-        st["bands"] = padded
+        st["bands"] = stored
         if preamp is not None:
             st["preamp_db"] = preamp
         st["source"] = os.path.abspath(args.file)
         save_state(st)
-        print(f"\napplied. {BAND_COUNT} bands written, committed.")
+        print(f"\napplied. {len(stored)} bands written"
+              + (", committed." if not dx1 else " to the active PEQ slot."))
     else:
         print("\ndry run — nothing sent.")
 
 
 def cmd_flat(args):
     assert_writable(args)
+    spec = DEVICES[getattr(args, "device", None) or "dx5ii"]
+    dx1 = spec.get("protocol") == "dx1"
+    if dx1:
+        print("DX1 II: flattening the ACTIVE PEQ config slot (one of 3).")
     dev = Device(args.dry_run, getattr(args, "device", None),
                  allow_unverified=getattr(args, "unverified", False))
     for i in range(REG_COUNT):
         for f in band_frames(i, DEFAULT_BAND):
             dev.send(f, f"band{i+1} default")
-    dev.commit()
+    if not dx1:
+        dev.commit()
     dev.close()
     if not args.dry_run:
         st = load_state()
@@ -759,11 +918,14 @@ def cmd_preamp(args):
     if db > 0:
         print(f"  warning: positive preamp ({db:+.1f} dB) can clip. AutoEQ presets"
               f" are always negative.")
+    spec = DEVICES[getattr(args, "device", None) or "dx5ii"]
+    dx1 = spec.get("protocol") == "dx1"
     dev = Device(args.dry_run, getattr(args, "device", None),
                  allow_unverified=getattr(args, "unverified", False))
     for f in preamp_frames(db):
         dev.send(f, f"preamp {db:+.1f} dB")
-    dev.commit()
+    if not dx1:
+        dev.commit()
     dev.close()
     if not args.dry_run:
         st = load_state()
@@ -777,6 +939,10 @@ def cmd_vol(args):
     db = args.db
     if not VOL_MIN_DB <= db <= VOL_MAX_DB:
         sys.exit(f"volume {db} dB out of range ({VOL_MIN_DB}..{VOL_MAX_DB})")
+    key = getattr(args, "device", None) or "dx5ii"
+    spec = DEVICES[key]
+    if spec.get("protocol") == "dx1":
+        return cmd_vol_dx1(args, spec)
     # The raw unit is NOT fixed at half a dB: volumeStep (settings field 32)
     # selects it. Measured on a DX5 II against the front panel, 2026-08-27:
     #   half_db: raw 60 -> -30.0 dB          one_db: raw 25 -> -25.0 dB
@@ -788,7 +954,6 @@ def cmd_vol(args):
     # writer opens one. read_settings() calls open_checked() internally, so
     # holding a Device open across it would mean two handles on a device that
     # only grants one -- and it takes a device KEY, not a Device instance.
-    key = getattr(args, "device", None) or "dx5ii"
     step_db = 0.5
     if getattr(args, "vol_step", None):
         # Explicit override. Needed because the settings READ is model-specific
@@ -829,13 +994,137 @@ def cmd_vol(args):
         print(f"volume {actual:+.1f} dB  (raw {steps})")
 
 
+def cmd_vol_dx1(args, spec):
+    """Volume on the DX1 II lives in the 0x810a output-state block, not at
+    0x7102: writing the DX5 II register is silently ignored by this firmware
+    (measured 2026-08-08 -- the front panel never moved). The block's frame 5
+    is loHpVolume, the knob's "all outputs" target; frames 3/4 address the
+    hp/lo memories individually. The device pushes the written frame back,
+    which this tool does not yet verify -- the read side lives in
+    readsettings.py. Front-panel-confirmed on hardware."""
+    raw = dx1_db_to_raw(args.db)
+    if args.db > VOL_WARN_DB and not args.force:
+        sys.exit(f"{args.db:+.1f} dB is loud — re-run with --force if you mean it")
+    cur = {"all": DX1_F_LOHP_VOL, "hp": DX1_F_HP_VOL, "lo": DX1_F_LO_VOL}[args.target]
+    dev = Device(args.dry_run, getattr(args, "device", None),
+                 allow_unverified=getattr(args, "unverified", False))
+    dev.send(dx1_block_frame(cur, raw),
+             f"dx1 volume {args.db:+.1f} dB (block frame {cur}, raw {raw})")
+    dev.close()
+    if not args.dry_run:
+        st = load_state()
+        st["volume_db"] = dx1_raw_to_db(raw)
+        save_state(st)
+        print(f"volume {dx1_raw_to_db(raw):+.1f} dB  (block frame {cur}, raw {raw})")
+
+
+def cmd_mute(args):
+    assert_writable(args)
+    spec = DEVICES[getattr(args, "device", None) or "dx5ii"]
+    if spec.get("protocol") != "dx1":
+        # 0x7103 exists in the vendor table but was never driven on DX5 II
+        # hardware, and a mute that silently fails is worse than no mute.
+        sys.exit("mute: not implemented for the DX5 II -- register 0x7103 is "
+                 "vendor-sourced but hardware-unverified; use the vendor app "
+                 "or the remote. The DX1 II mute needs --device dx1ii --unverified.")
+    dev = Device(args.dry_run, getattr(args, "device", None),
+                 allow_unverified=getattr(args, "unverified", False))
+    dev.send(dx1_block_frame(DX1_F_MUTE, DX1_MUTE[args.state]),
+             f"dx1 mute {args.state} (block frame {DX1_F_MUTE}, "
+             f"raw {DX1_MUTE[args.state]})")
+    dev.close()
+    if not args.dry_run:
+        print(f"mute {args.state}")
+
+
+def cmd_input(args):
+    assert_writable(args)
+    spec = DEVICES[getattr(args, "device", None) or "dx5ii"]
+    if spec.get("protocol") != "dx1":
+        sys.exit("input: not implemented for the DX5 II (0x7104 unverified on "
+                 "hardware); setctl.py exposes the fields that read back there.")
+    raw = 0 if args.source == "usb" else 1
+    dev = Device(args.dry_run, getattr(args, "device", None),
+                 allow_unverified=getattr(args, "unverified", False))
+    dev.send(frame(*DX1_REG_INPUT, raw), f"dx1 input {args.source}")
+    dev.close()
+    if not args.dry_run:
+        print(f"input {args.source}")
+
+
+def cmd_filter(args):
+    assert_writable(args)
+    spec = DEVICES[getattr(args, "device", None) or "dx5ii"]
+    if spec.get("protocol") != "dx1":
+        sys.exit("filter: for the DX5 II use setctl.py pcmFilter (read-back "
+                 "verified there); this command implements the DX1 II register.")
+    raw = args.filter.lower()
+    if raw.startswith("f") and raw[1:].isdigit():
+        raw = int(raw[1:]) - 1
+    else:
+        sys.exit("filter takes f1..f8 (or 0..7)")
+    if not 0 <= raw <= 7:
+        sys.exit("filter takes f1..f8 (or 0..7)")
+    dev = Device(args.dry_run, getattr(args, "device", None),
+                 allow_unverified=getattr(args, "unverified", False))
+    dev.send(frame(*DX1_REG_FILTER, raw), f"dx1 pcm filter f{raw + 1}")
+    dev.close()
+    if not args.dry_run:
+        print(f"filter f{raw + 1}")
+
+
+def cmd_eq(args):
+    """EQ on/off and slot select for the DX1 II. switchMcuConfig (0x110e)
+    selects which of the 3 stored PEQ slots is active, with 0xffffffff = EQ
+    off. Writing 0x1204/0x1206 directly does NOT work -- they are report-only
+    (measured: 0x1204 write left the state at 7)."""
+    assert_writable(args)
+    spec = DEVICES[getattr(args, "device", None) or "dx5ii"]
+    if spec.get("protocol") != "dx1":
+        sys.exit("eq: only implemented for the DX1 II's 3-slot PEQ.")
+    if args.state == "off":
+        value, label = 0xFFFFFFFF, "eq off"
+    elif args.state == "on":
+        # Re-enable the last active slot. 0x1206 is report-only; the live
+        # path reads it through devstate so the report-id prefix is applied.
+        # --dry-run must not open the device: the slot is filled in only when
+        # the frame is actually sent, and the printed write uses slot 1.
+        if args.dry_run:
+            value, label = 0, "eq on (dry-run assumes slot 1; live run reads 0x1206)"
+        else:
+            import devstate
+            h = open_checked(getattr(args, "device", None) or "dx5ii")
+            try:
+                val = devstate.dx1_query(h, *DX1_REG_QUERY_CFG)
+            finally:
+                h.close()
+            if val is None or val > 2:
+                val = 0
+            value, label = val, f"eq on (slot {val + 1})"
+    else:
+        slot = int(args.state)
+        if not 1 <= slot <= 3:
+            sys.exit("eq takes on, off, or a slot number 1-3")
+        value, label = slot - 1, f"eq slot {slot}"
+    dev = Device(args.dry_run, getattr(args, "device", None),
+                 allow_unverified=getattr(args, "unverified", False))
+    dev.send(frame(*DX1_REG_SWITCH_CFG, value), label)
+    dev.close()
+    if not args.dry_run:
+        print(label)
+
+
 def cmd_gain(args):
     assert_writable(args)
     on = args.state == "on"
+    spec = DEVICES[getattr(args, "device", None) or "dx5ii"]
     dev = Device(args.dry_run, getattr(args, "device", None),
                  allow_unverified=getattr(args, "unverified", False))
-    dev.send(frame(REG_CTRL, SUB_GAIN, 1 if on else 0), f"gain {args.state}")
-    dev.commit()
+    if spec.get("protocol") == "dx1":
+        dev.send(frame(*DX1_REG_HIGH_GAIN, 1 if on else 0), f"gain {args.state}")
+    else:
+        dev.send(frame(REG_CTRL, SUB_GAIN, 1 if on else 0), f"gain {args.state}")
+        dev.commit()
     dev.close()
     if not args.dry_run:
         st = load_state()
@@ -848,10 +1137,17 @@ def cmd_gain(args):
 def cmd_power(args):
     assert_writable(args)
     on = args.state == "on"
+    spec = DEVICES[getattr(args, "device", None) or "dx5ii"]
     dev = Device(args.dry_run, getattr(args, "device", None),
                  allow_unverified=getattr(args, "unverified", False))
-    dev.send(frame(REG_CTRL, SUB_POWER, int(on), b4=SUB_POWER_B4, crc=True),
-             f"power {args.state}")
+    if spec.get("protocol") == "dx1":
+        # Standby/wake is dx1State: 2 = standby, 1 = working. No checksum, no
+        # commit; the device pushes its state back. Verified asleep and awake
+        # on hardware.
+        dev.send(frame(*DX1_REG_STATE, 1 if on else 2), f"power {args.state}")
+    else:
+        dev.send(frame(REG_CTRL, SUB_POWER, int(on), b4=SUB_POWER_B4, crc=True),
+                 f"power {args.state}")
     dev.close()
     if not args.dry_run:
         print(f"power {args.state}")
@@ -880,7 +1176,11 @@ def cmd_show(args):
 
 def cmd_dump(args):
     st = load_state()
-    out = json.dumps({"bands": st["bands"], "volume_db": st.get("volume_db"),
+    # A cache written before the 11th register was kept off the preset still
+    # round-trips: validate() only accepts the usable bands.
+    spec = DEVICES[getattr(args, "device", None) or "dx5ii"]
+    bands = st["bands"][:band_count(spec)]
+    out = json.dumps({"bands": bands, "volume_db": st.get("volume_db"),
                       "gain": st.get("gain")}, indent=2)
     if args.file:
         open(args.file, "w").write(out + "\n")
@@ -941,7 +1241,27 @@ def main():
     a = sub.add_parser("vol", help="set volume in dB, e.g. -30")
     a.add_argument("db", type=float)
     a.add_argument("--force", action="store_true", help="allow levels above -10 dB")
+    a.add_argument("--target", choices=["all", "hp", "lo"], default="all",
+                   help="DX1 II only: which volume to set -- the knob's all "
+                        "outputs target (default), or the hp/lo memories")
     a.set_defaults(func=cmd_vol)
+
+    a = sub.add_parser("mute", help="DX1 II mute: off, analog, opt, or both")
+    a.add_argument("state", choices=["off", "analog", "opt", "both"],
+                   help="off = neither, analog = hp/lo, opt = optical, both")
+    a.set_defaults(func=cmd_mute)
+
+    a = sub.add_parser("input", help="input source usb/opt (DX1 II)")
+    a.add_argument("source", choices=["usb", "opt"])
+    a.set_defaults(func=cmd_input)
+
+    a = sub.add_parser("filter", help="PCM filter f1-f8 (DX1 II)")
+    a.add_argument("filter", metavar="f1..f8")
+    a.set_defaults(func=cmd_filter)
+
+    a = sub.add_parser("eq", help="EQ on/off or select stored slot 1-3 (DX1 II)")
+    a.add_argument("state", metavar="on|off|1-3")
+    a.set_defaults(func=cmd_eq)
 
     a = sub.add_parser("gain", help="headphone gain")
     a.add_argument("state", choices=["on", "off"])

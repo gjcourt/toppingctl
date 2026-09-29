@@ -45,6 +45,29 @@ jobs:
           ./smoke.py --dry-run
           ./probe.py 0x04 0 --dry-run
           ./setctl.py --list
+          ./toppingctl.py --device dx1ii --dry-run vol -30
+          ./toppingctl.py --device dx1ii --dry-run vol -30 --target hp
+          ./toppingctl.py --device dx1ii --dry-run mute off
+          ./toppingctl.py --device dx1ii --dry-run mute analog
+          ./toppingctl.py --device dx1ii --dry-run mute opt
+          ./toppingctl.py --device dx1ii --dry-run mute both
+          ./toppingctl.py --device dx1ii --dry-run gain on
+          ./toppingctl.py --device dx1ii --dry-run power off
+          ./toppingctl.py --device dx1ii --dry-run input opt
+          ./toppingctl.py --device dx1ii --dry-run filter f3
+          ./toppingctl.py --device dx1ii --dry-run eq off
+          ./toppingctl.py --device dx1ii --dry-run eq on
+          ./toppingctl.py --device dx1ii --dry-run eq 2
+          ./toppingctl.py --device dx1ii --dry-run preamp -6
+          ./toppingctl.py --device dx1ii --dry-run flat
+          ./toppingctl.py --device dx1ii --dry-run apply presets/bass1.json
+          ./toppingctl.py --device dx5ii --dry-run vol -30
+          ./toppingctl.py --device dx5ii --dry-run vol -30 --target hp
+          ./toppingctl.py --device dx5ii --dry-run gain on
+          ./toppingctl.py --device dx5ii --dry-run power off
+          ./toppingctl.py --device dx5ii --dry-run preamp -6
+          ./toppingctl.py --device dx5ii --dry-run flat
+          ./toppingctl.py --device dx5ii --dry-run apply presets/bass1.json
 
   # Branch protection requires a check named exactly `lint-and-dryrun`. A matrix
   # renames its check runs to `lint-and-dryrun (3.11)` etc., so that required
