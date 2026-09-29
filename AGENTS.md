@@ -39,7 +39,7 @@ Sequence: `devices` for the PID → entry with `"status": "unverified"` →
 ## Conventions
 
 - **Apache-2.0**, © George Courtsunis.
-- **`ruff check`** is the lint gate; CI runs it plus dry-run exercises of every
+- **`ruff check`** and **`ruff format --check`** are the lint gate (run `ruff format .` before committing); CI runs it plus dry-run exercises of every
   frame builder, so CI needs no hardware.
 - `python3 -m unittest test_offline` runs offline regression tests (no
   hardware; needs `hid` importable). CI runs them on both matrix
