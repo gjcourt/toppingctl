@@ -52,7 +52,7 @@ def dx1_show(st):
         outs = "/".join(n for bit, n in [(1, "lo"), (2, "hp"), (4, "opt")] if mask & bit) or "none"
         print(f"  f2  state       {s:>4}   = outputs {outs}, "
               f"volume {'linked' if s >> 4 & 1 else 'independent'}, "
-              f"eq route {('analog', 'opt', 'both')[s >> 6 & 3]}")
+              f"eq route {('analog', 'opt', 'both', 'unknown (0b11)')[s >> 6 & 3]}")
     print("\nregisters (read-safe set only -- see devstate.dx1_query; the")
     print("write-only registers' state arrives as unsolicited pushes)")
     labels = {

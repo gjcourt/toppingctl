@@ -34,6 +34,12 @@ jobs:
       - name: Lint
         run: ruff check .
 
+      # No hardware: toppingctl's code paths with the HID device mocked out
+      # (test_offline.py). Runs on every matrix interpreter, so the 3.11 leg
+      # catches syntax the audio nodes' bookworm Python can't parse.
+      - name: Offline regression tests
+        run: python -m unittest -v test_offline
+
       - name: Dry-run exercises every frame builder without hardware
         run: |
           ./toppingctl.py --dry-run vol -30
