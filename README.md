@@ -22,10 +22,16 @@ replaced guesses with the vendor's own values. Full spec:
 | Model | PID | Status |
 |---|---|---|
 | **Topping DX5 II** | `0x8750` | ✅ **confirmed** — driven on real hardware |
+| Topping D90 III Discrete | `0x8750` | ⚠️ **unverified** — PEQ, preamp and EQ-enable echo correctly; volume is not on this interface at all |
 
-⚠️ **Only the DX5 II has been proven.** Other Topping models are *likely*
-compatible — the vendor drives its whole range from one web app, which is
-suggestive but not evidence. **No other model is listed until someone runs one.**
+⚠️ **Only the DX5 II is confirmed.** The D90 III Discrete is listed as
+unverified: reads and `--dry-run` work, writes need `--unverified`. Volume
+specifically does not work there even with `--unverified` — writes are
+accepted with no error, but the front panel never moves, because on this model
+volume lives on the UAC2/ALSA mixer, not this protocol (see the `"d90iii"`
+entry in `DEVICES`). Other Topping models are *likely* compatible — the vendor
+drives its whole range from one web app, which is suggestive but not evidence
+— but nothing else is listed until someone runs one.
 
 ### Adding a device
 
@@ -117,7 +123,12 @@ read it back. That is as strong as verification gets short of a measurement rig.
 ## Install
 
 ```bash
+# macOS
 brew install hidapi
+pip3 install hid
+
+# Debian / Ubuntu
+sudo apt-get install libhidapi-hidraw0 libhidapi-libusb0
 pip3 install hid
 ```
 
@@ -175,12 +186,54 @@ and the vendor UI's "BANDS n / 10" reports the hardware correctly.
 All eleven registers are still written, so a stale band 11 left behind by the
 vendor app is cleared rather than left underneath your preset.
 
+The headphone corrections that ship in `presets/` — what each one targets, its
+preamp, and the hardware caveats behind a couple of them — are documented in
+[`presets/README.md`](presets/README.md).
+
+## Other tools
+
+`toppingctl.py` covers day-to-day use. A few standalone scripts exist for
+reading, diagnosing and mapping the rest of the protocol:
+
+```bash
+./readsettings.py                # query the device and print its real state, decoded
+./listen.py --read GetSettings   # send a readNack for a command, print whatever comes back
+./meters.py                      # live VU and FFT meters, pushed unsolicited by the device
+./scenes.py recall c1            # recall a device-stored scene (C1/C2), diff settings before/after
+./setctl.py --list               # set a settings field by name, verified by reading it back
+./probe.py 0x04 2                # one raw register write, for mapping an unknown enum by front panel
+```
+
+`listen.py` sends the same `readNack` (`0x10`) that `readsettings.py` and
+`devstate.py` use, but for any command — given as a hex address or a vendor
+name from `vendor_commands.py` — and prints every frame that comes back
+decoded. It's the tool that first showed the device answers reads at all:
+everything before it only ever sent `writeNack` (`0x20`).
+
+`setctl.py` writes any named settings field with a read-verify round trip: read
+the field, write it, read it back, and report a mismatch as failure rather than
+success. Most fields map straight to a vendor command name; a handful more
+(brightness, mute, and others) are aliased by inferred name-similarity and carry a
+confidence label — `hardware`, `register` or `unchecked`, shown by `--list` —
+because inference from a name is exactly what put an inert PEQ band into this
+project's defaults once already.
+
+`scenes.py recall c1` (or `c2`) recalls one of the DX5 II's own stored scenes
+and prints what changed, since there is no way to know what a scene holds
+without recalling it. PEQ is not in the diff: band registers echo on write but
+do not report their contents on read. Saving is deliberately not implemented:
+`SaveC1`/`SaveC2` would overwrite slots the operator may have set from the
+front panel, with no way to read them first.
+
+`probe.py` sends a single raw register write and asks you to watch the front
+panel. It is deliberately not a `toppingctl.py` subcommand — the values these
+registers take are not yet known, and shipping a guessed mapping as CLI surface
+is how the inert PEQ band above got shipped as a default.
+
 ## Two things to know
 
 **The device can be read** — `./readsettings.py` queries it and prints the real
-state, decoded. Send a `readNack` (protocol byte `0x10`) for `GetSettings`
-(`0x710c`) and the device replies with its whole configuration as a numbered
-array of 32-bit records.
+state, decoded (see [Other tools](#other-tools) for how).
 
 This was previously believed impossible. Reads *do* return state; the confusion
 was that the device streams all-zero input reports while idle, so anyone
@@ -216,3 +269,20 @@ and verified by round trip at `-6.0 dB`.
   stored on the device.
 - Power uses two frames replayed verbatim from capture, since that register
   needs a real checksum and does not answer the checksum oracle.
+
+## Development
+
+```bash
+ruff check .                          # lint gate
+./toppingctl.py --dry-run vol -30     # exercise a frame builder, no hardware needed
+./smoke.py --dry-run
+```
+
+CI runs on Python 3.11 and 3.14, lints with ruff, and exercises `vol`, `gain`,
+`power`, `flat` and `apply` (against `bass1.json` and every `.txt` preset) with
+`--dry-run`, plus `smoke.py --dry-run`, `probe.py 0x04 0 --dry-run` and
+`setctl.py --list` — none of it touches hardware. 3.11 is not a lower bound
+picked out of caution: the audio
+nodes this tool actually runs on ship Debian bookworm's Python 3.11, and a
+newer f-string syntax once slipped past CI because only the newest interpreter
+was tested.
