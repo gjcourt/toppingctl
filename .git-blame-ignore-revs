@@ -1,0 +1,6 @@
+# Formatting-only commits, skipped by `git blame` so it credits the real
+# authors. GitHub honours this file; locally:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+# style: ruff format the repo and enforce it in CI (#19)
+b9f970fde0a245ef1f67740374b95b4ff1b0bf6d
