@@ -9,6 +9,7 @@ the four payload bytes land at 4*index, LSB first.
     ./meters.py            # 10s of both
     ./meters.py --secs 30
 """
+
 import argparse
 import sys
 import time
@@ -41,8 +42,9 @@ def _bar(db, width=32, floor=-60):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--secs", type=float, default=10.0)
     ap.add_argument("--device", default="dx5ii")
     a = ap.parse_args()
@@ -81,8 +83,7 @@ def main():
                     last_vu = time.time()
                     left = _i16(vu_buf[0], vu_buf[1])
                     right = _i16(vu_buf[2], vu_buf[3])
-                    print(f"  VU  L {left:4d} dB |{_bar(left)}|   "
-                          f"R {right:4d} dB |{_bar(right)}|")
+                    print(f"  VU  L {left:4d} dB |{_bar(left)}|   R {right:4d} dB |{_bar(right)}|")
                     vu_buf.clear()
             elif cmd == FFT:
                 counts[FFT] += 1
@@ -91,16 +92,16 @@ def main():
                 if all(i in fft_buf for i in range(30)) and time.time() - last_fft > 0.15:
                     last_fft = time.time()
                     bands = [_i8(fft_buf[i]) for i in range(30)]
-                    spark = "".join(" ▁▂▃▄▅▆▇█"[max(0, min(8, round((d + 60) / 60 * 8)))]
-                                    for d in bands)
+                    spark = "".join(
+                        " ▁▂▃▄▅▆▇█"[max(0, min(8, round((d + 60) / 60 * 8)))] for d in bands
+                    )
                     print(f"  FFT [{spark}]")
                     fft_buf.clear()
             else:
                 counts["other"] += 1
     finally:
         h.close()
-    print(f"\n  VU frames {counts[VU]}   FFT frames {counts[FFT]}   "
-          f"other {counts['other']}")
+    print(f"\n  VU frames {counts[VU]}   FFT frames {counts[FFT]}   other {counts['other']}")
     if not counts[VU] and not counts[FFT]:
         print("  nothing pushed. the heartbeat above should keep the stream")
         print("  alive; check the device is awake and audio is playing.")

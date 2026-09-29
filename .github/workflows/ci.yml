@@ -29,10 +29,13 @@ jobs:
           sudo apt-get install -y libhidapi-hidraw0 libhidapi-libusb0
 
       - name: Install deps
-        run: pip install hid ruff
+        run: pip install hid -r requirements-dev.txt
 
       - name: Lint
         run: ruff check .
+
+      - name: Format
+        run: ruff format --check .
 
       # No hardware: toppingctl's code paths with the HID device mocked out
       # (test_offline.py). Runs on every matrix interpreter, so the 3.11 leg

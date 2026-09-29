@@ -8,6 +8,7 @@ them locally from anywhere with `hid` importable (toppingctl imports it):
     python3 -m unittest test_offline      # from the repo root
     ./test_offline.py
 """
+
 import argparse
 import ast
 import contextlib
@@ -29,8 +30,11 @@ def load_dx1_show():
     imports and function/class defs to get at dx1_show() without hardware."""
     with open(os.path.join(HERE, "readsettings.py")) as fh:
         tree = ast.parse(fh.read())
-    keep = [n for n in tree.body
-            if isinstance(n, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.ClassDef))]
+    keep = [
+        n
+        for n in tree.body
+        if isinstance(n, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.ClassDef))
+    ]
     ns = {"__name__": "readsettings_under_test"}
     exec(compile(ast.Module(body=keep, type_ignores=[]), "readsettings.py", "exec"), ns)
     return ns["dx1_show"]

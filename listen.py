@@ -17,6 +17,7 @@ Usage:
 
 Sends nothing except readNack, which is what the vendor app itself issues.
 """
+
 import argparse
 import sys
 import time
@@ -59,8 +60,9 @@ def decode(buf):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--read", metavar="CMD", help="send a readNack first, hex or vendor name")
     ap.add_argument("--secs", type=float, default=10.0)
     ap.add_argument("--raw", action="store_true", help="also print frames that do not decode")
@@ -93,8 +95,10 @@ def main():
         d = decode(bytes(buf))
         dt = time.time() - t0
         if d:
-            print(f"  {dt:6.2f}s  {d['proto']:<9} idx={d['b4']:<3} {d['name']:<22} "
-                  f"= {d['signed']:<11} 0x{d['value']:08x}  |{d['ascii']}|")
+            print(
+                f"  {dt:6.2f}s  {d['proto']:<9} idx={d['b4']:<3} {d['name']:<22} "
+                f"= {d['signed']:<11} 0x{d['value']:08x}  |{d['ascii']}|"
+            )
         elif a.raw:
             print(f"  {dt:6.2f}s  RAW {bytes(buf).hex(' ')}")
     h.close()

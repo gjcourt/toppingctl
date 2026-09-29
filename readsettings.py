@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Read the DAC's actual state. Not a cache -- the device is queried."""
+
 import argparse
 import math
 
@@ -44,15 +45,19 @@ def dx1_show(st):
             print(f"  f{idx}  {label:<12} {blk[idx]:>4}   = {dx1_db(blk[idx]):+.1f} dB")
     if DX1_F_MUTE in blk:
         m = blk[DX1_F_MUTE]
-        print(f"  f7  mute        {m:>4}   = analog {'muted' if m & 1 else 'unmuted'}, "
-              f"opt {'muted' if m & 2 else 'unmuted'}")
+        print(
+            f"  f7  mute        {m:>4}   = analog {'muted' if m & 1 else 'unmuted'}, "
+            f"opt {'muted' if m & 2 else 'unmuted'}"
+        )
     s = blk.get(2)
     if s is not None:
         mask = s & 7
         outs = "/".join(n for bit, n in [(1, "lo"), (2, "hp"), (4, "opt")] if mask & bit) or "none"
-        print(f"  f2  state       {s:>4}   = outputs {outs}, "
-              f"volume {'linked' if s >> 4 & 1 else 'independent'}, "
-              f"eq route {('analog', 'opt', 'both', 'unknown (0b11)')[s >> 6 & 3]}")
+        print(
+            f"  f2  state       {s:>4}   = outputs {outs}, "
+            f"volume {'linked' if s >> 4 & 1 else 'independent'}, "
+            f"eq route {('analog', 'opt', 'both', 'unknown (0b11)')[s >> 6 & 3]}"
+        )
     print("\nregisters (read-safe set only -- see devstate.dx1_query; the")
     print("write-only registers' state arrives as unsolicited pushes)")
     labels = {
@@ -75,8 +80,10 @@ def dx1_show(st):
             continue
         extra = f"   = {table.get(v, '?')}" if table else ""
         if key == "eqEnableState":
-            extra = (f"   = {'on' if v & 2 else 'off'}"
-                     f" (runtime {'active' if v & 1 else 'idle'}, valid={bool(v & 4)})")
+            extra = (
+                f"   = {'on' if v & 2 else 'off'}"
+                f" (runtime {'active' if v & 1 else 'idle'}, valid={bool(v & 4)})"
+            )
         if key == "eqCurrentConfig":
             extra = f"   = EQ{v + 1 if v is not None and v <= 2 else '?'} active"
         print(f"  {label:<18} {v:<6}{extra}")
@@ -99,8 +106,10 @@ def dx1_show(st):
                 if p & 0xFF == 1:
                     active.append(f"{ch}{j + 1}:{fr}Hz {g / 10:+.1f}dB")
         cur = "  <= ACTIVE" if regs.get("eqCurrentConfig") == i - 1 else ""
-        print(f"  slot {i} \"{name}\"  preamp {pre_l:+.1f}/{pre_r:+.1f} dB, "
-              f"{len(active)} band(s) on{cur}")
+        print(
+            f'  slot {i} "{name}"  preamp {pre_l:+.1f}/{pre_r:+.1f} dB, '
+            f"{len(active)} band(s) on{cur}"
+        )
         if active:
             print("    " + "  ".join(active))
 
@@ -124,8 +133,10 @@ name = b"".join(rec.get(i, 0).to_bytes(4, "big")[::-1] for i in range(1, 9))
 # invisible until the tool was actually run on one.
 dev_name = name.split(b"\x00")[0].decode("ascii", "replace").strip()
 print(f"device      {dev_name}")
-print(f"records     {len(rec)}  (firmware >= 2.40 adds 48..51: "
-      f"{'yes' if max(rec, default=0) >= 48 else 'no'})\n")
+print(
+    f"records     {len(rec)}  (firmware >= 2.40 adds 48..51: "
+    f"{'yes' if max(rec, default=0) >= 48 else 'no'})\n"
+)
 for i in sorted(rec):
     if i in range(1, 9):
         continue

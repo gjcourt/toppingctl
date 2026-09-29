@@ -13,6 +13,7 @@ on) and inference is what produced every wrong entry in this project's history.
     ./setctl.py pcmFilter f3
     ./setctl.py --list
 """
+
 import argparse
 import sys
 
@@ -49,8 +50,14 @@ ALIASES = {
     "crossfeedSimpleOptionMask": ("CrossfeedSimpleOption", "unchecked"),
 }
 # Never settable from here.
-NEVER = {"powered", "sampleRate", "inputOptionMask", "outputOptionMask",
-         "crossfeedConvolutionOptionMask", "crossfeedSimpleOptionMask"}
+NEVER = {
+    "powered",
+    "sampleRate",
+    "inputOptionMask",
+    "outputOptionMask",
+    "crossfeedConvolutionOptionMask",
+    "crossfeedSimpleOptionMask",
+}
 
 _BY_NAME = {n.lower(): c for c, n in COMMANDS.items()}
 
@@ -61,8 +68,9 @@ def cmd_for(field):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("field", nargs="?")
     ap.add_argument("value", nargs="?")
     ap.add_argument("--list", action="store_true")
@@ -127,8 +135,9 @@ def main():
     if after == (raw & 0xFFFFFFFF):
         print(f"  VERIFIED: device reports {devstate.label(field, after)}")
     else:
-        print(f"  FAILED: device reports {devstate.label(field, after)} "
-              f"(raw {after}), expected {raw}")
+        print(
+            f"  FAILED: device reports {devstate.label(field, after)} (raw {after}), expected {raw}"
+        )
         sys.exit(1)
 
 
