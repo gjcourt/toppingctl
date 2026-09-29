@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Offline regression tests -- no hardware, same as --dry-run.
 
-CI does not run these yet: .github/workflows/ci.yml runs ruff and the
-dry-run commands only. Run from anywhere with `hid` importable (toppingctl
-imports it):
+CI runs these on every matrix interpreter (.github/workflows/ci.yml,
+"Offline regression tests"), alongside ruff and the dry-run commands. Run
+them locally from anywhere with `hid` importable (toppingctl imports it):
 
     python3 -m unittest test_offline      # from the repo root
     ./test_offline.py
