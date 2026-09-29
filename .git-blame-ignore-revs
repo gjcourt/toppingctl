@@ -2,5 +2,6 @@
 # authors. GitHub honours this file; locally:
 #   git config blame.ignoreRevsFile .git-blame-ignore-revs
 
-# style: ruff format the repo and enforce it in CI (#19)
+# style: ruff format the repo and enforce it in CI (#19). The squash also
+# holds the few ci.yml/AGENTS.md/requirements-dev.txt lines that add the gate.
 b9f970fde0a245ef1f67740374b95b4ff1b0bf6d
