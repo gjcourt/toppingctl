@@ -116,8 +116,9 @@ class PerDeviceBandCountTest(unittest.TestCase):
 
     def test_show_refuses_before_printing_when_band_count_unset(self):
         out = io.StringIO()
-        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as cm:
             toppingctl.cmd_show(self.args("fakeunset"))
+        self.assertIn("band count is not established", str(cm.exception.code))
         self.assertEqual(out.getvalue(), "")
 
 
