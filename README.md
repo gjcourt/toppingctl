@@ -55,7 +55,7 @@ D90 III's UAC2-only volume) and the device-verification workflow are in
 | `--device` | `dx5ii` | Target model: `dx5ii`, `d90iii`, or `dx1ii`. |
 | `--dry-run` | off | Print frames instead of sending them. |
 | `--unverified` | off | Allow writes to a device whose register map isn't confirmed. |
-| `--force` | off | Allow `vol` above −10 dB. |
+| `--force` | off | `vol` option: allow levels above −10 dB. |
 | `--vol-step` | read from device | Override the dB-per-step, for models that don't support a settings read. |
 
 ## How it works
@@ -83,8 +83,8 @@ python3 -m unittest -v test_offline
 ```
 
 CI (`.github/workflows/ci.yml`) runs the same checks on Python 3.11 and 3.14, plus
-dry-run exercises of every frame builder across all three devices — none of it
-touches hardware. Conventions for contributors and agents: [AGENTS.md](AGENTS.md).
+dry-run exercises of the DX5 II (via `smoke.py`) and DX1 II frame builders — none
+of it touches hardware. Conventions for contributors and agents: [AGENTS.md](AGENTS.md).
 
 ## License
 
