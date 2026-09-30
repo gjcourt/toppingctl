@@ -16,6 +16,7 @@ needed to put things back.
 Saving is deliberately absent. SaveC1/SaveC2 overwrite slots the operator may
 have set from the front panel, with no undo and no way to read them first.
 """
+
 import argparse
 import sys
 
@@ -27,8 +28,9 @@ RECALL = {"c1": 0x7111, "c2": 0x7112}
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("action", choices=["recall"])
     ap.add_argument("slot", choices=["c1", "c2"])
     ap.add_argument("--dry-run", action="store_true")
@@ -46,12 +48,13 @@ def main():
         return 0
 
     after = devstate.by_name()
-    changed = [(k, before.get(k), after.get(k))
-               for k in sorted(set(before) | set(after))
-               if before.get(k) != after.get(k)]
+    changed = [
+        (k, before.get(k), after.get(k))
+        for k in sorted(set(before) | set(after))
+        if before.get(k) != after.get(k)
+    ]
     if not changed:
-        print(f"  nothing changed -- {a.slot} either matches the current state "
-              f"or is empty")
+        print(f"  nothing changed -- {a.slot} either matches the current state or is empty")
         return 0
     print(f"  {len(changed)} field(s) changed:")
     for k, b, c in changed:

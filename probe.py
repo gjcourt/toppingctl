@@ -13,6 +13,7 @@ Usage:
     ./probe.py 0x04 2            # input select = 2
     ./probe.py 0x05 3 --dry-run  # show the frame, send nothing
 """
+
 import argparse
 import sys
 
@@ -28,8 +29,9 @@ FORBIDDEN = {c & 0xFF: n for c, n in COMMANDS.items() if n in NEVER}
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("sub", help="sub-register, e.g. 0x04")
     ap.add_argument("value", type=int)
     ap.add_argument("--dry-run", action="store_true")

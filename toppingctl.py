@@ -227,7 +227,7 @@ THESYCON_VID = 0x152A
 # usage page 1. Writes to the others fail at the OS layer.
 PROTOCOL_USAGE_PAGE = 1
 
-REG_CTRL = 0x71           # device control
+REG_CTRL = 0x71  # device control
 SUB_POWER = 0x01
 SUB_VOLUME = 0x02
 SUB_GAIN = 0x17
@@ -237,9 +237,9 @@ SUB_GAIN = 0x17
 # this code has always meant by it; renaming is a separate change.
 SUB_COMMIT = 0x34  # vendor name: Heartbeat
 
-PEQ_FIRST, PEQ_LAST = 0x91, 0x9B      # 11 band registers exist ...
-REG_PREAMP = 0x9C                     # preamp: subs 01/03 = value L/R, 02/04 = enable
-PREAMP_SCALE = 1 << 25                # linear gain in Q25 fixed point
+PEQ_FIRST, PEQ_LAST = 0x91, 0x9B  # 11 band registers exist ...
+REG_PREAMP = 0x9C  # preamp: subs 01/03 = value L/R, 02/04 = enable
+PREAMP_SCALE = 1 << 25  # linear gain in Q25 fixed point
 REG_COUNT = PEQ_LAST - PEQ_FIRST + 1  # ... and all 11 are written
 # ... but only 10 of them DO anything. Topping documents 10; the vendor app
 # nonetheless writes all eleven, which made an undocumented eleventh band a
@@ -272,9 +272,10 @@ def band_count(spec):
             "It is not read from a datasheet -- the DX5 II's 10 was found by "
             "writing a filter to each band and listening, which also caught an "
             "eleventh register that accepts writes and drives nothing.\n"
-            "Do the same here before using PEQ, then set \"bands\" in DEVICES."
+            'Do the same here before using PEQ, then set "bands" in DEVICES.'
         )
     return n
+
 
 # --- DX1 II protocol (measured on hardware; vendor names from the
 # --- home.toppingaudio.com bundle, same provenance as vendor_commands.py) ----
@@ -285,7 +286,7 @@ def band_count(spec):
 # block instead of single registers, and writes need the report-id-0 framing
 # the D90 III needs (see Device._wire). The vendor splits its single-frame
 # traffic from block traffic by byte 3: 0x01 = totalFrameLen 1, here 12.
-DX1_OUT_STATE = 0x810A          # the output-state block, 12 frames
+DX1_OUT_STATE = 0x810A  # the output-state block, 12 frames
 DX1_BLOCK_LEN = 12
 # Frame indices inside the 0x810a block (1-based, as the device numbers them):
 #   1 protocol/version, 2 state word (output mask, volumeLinked, peqRoute),
@@ -293,16 +294,16 @@ DX1_BLOCK_LEN = 12
 #   8-12 fixed-restore snapshot. Writing frame n updates that one field; the
 #   device acks by pushing the changed frame back.
 DX1_F_HP_VOL, DX1_F_LO_VOL, DX1_F_LOHP_VOL, DX1_F_OPT_VOL = 3, 4, 5, 6
-DX1_F_MUTE = 7                  # bit0 = analog muted, bit1 = opt muted
+DX1_F_MUTE = 7  # bit0 = analog muted, bit1 = opt muted
 # Four stored states of that bitmask. "on"/"off" cannot name them: writing 1
 # mutes analog and clears optical.
 DX1_MUTE = {"off": 0, "analog": 1, "opt": 2, "both": 3}
-DX1_REG_STATE = (0x71, 0x00)    # 1 = working, 2 = standby (also pushed live)
-DX1_REG_FILTER = (0x73, 0x00)   # PCM filter, 0..7
+DX1_REG_STATE = (0x71, 0x00)  # 1 = working, 2 = standby (also pushed live)
+DX1_REG_FILTER = (0x73, 0x00)  # PCM filter, 0..7
 DX1_REG_HIGH_GAIN = (0x75, 0x00)  # headphone gain, 0/1
-DX1_REG_INPUT = (0x7B, 0x00)    # input, 0 = usb, 1 = optical
+DX1_REG_INPUT = (0x7B, 0x00)  # input, 0 = usb, 1 = optical
 DX1_REG_SWITCH_CFG = (0x11, 0x0E)  # select PEQ slot 0..2; 0xffffffff = EQ off
-DX1_REG_QUERY_CFG = (0x12, 0x06)   # read back active PEQ slot (0..2)
+DX1_REG_QUERY_CFG = (0x12, 0x06)  # read back active PEQ slot (0..2)
 DX1_REG_QUERY_ENABLE = (0x12, 0x04)  # read back EQ enable bits (bit1 = on)
 
 # Volume raw is (dB + 99) * 10, 0..990. Below -10 dB the scale is 1 dB/step
@@ -332,10 +333,23 @@ def dx1_block_frame(cur, data, opcode=0x20):
     """One frame of the 0x810a output-state block: 15 bytes, report id added
     by _wire(). The device pushes the whole block back on change, which is the
     read channel for volume and mute -- there is no 0x710c GetSettings here."""
-    f = [0x22, 0x33, opcode, DX1_BLOCK_LEN, cur,
-         DX1_OUT_STATE >> 8, DX1_OUT_STATE & 0xFF,
-         (data >> 24) & 0xFF, (data >> 16) & 0xFF, (data >> 8) & 0xFF, data & 0xFF,
-         0, 0, 0x66, 0x77]
+    f = [
+        0x22,
+        0x33,
+        opcode,
+        DX1_BLOCK_LEN,
+        cur,
+        DX1_OUT_STATE >> 8,
+        DX1_OUT_STATE & 0xFF,
+        (data >> 24) & 0xFF,
+        (data >> 16) & 0xFF,
+        (data >> 8) & 0xFF,
+        data & 0xFF,
+        0,
+        0,
+        0x66,
+        0x77,
+    ]
     return bytes(f)
 
 
@@ -388,10 +402,12 @@ def db_to_q25(db):
 
 def q25_to_db(v):
     import math
+
     return 20 * math.log10(v / PREAMP_SCALE) if v > 0 else float("-inf")
 
 
 # --- frame construction -----------------------------------------------------
+
 
 def crc16_modbus(data):
     """Reflected CRC-16, polynomial 0xA001, init 0xFFFF, no final XOR."""
@@ -416,8 +432,19 @@ def frame(reg, sub, value, opcode=0x20, b4=0x01, crc=False):
     the traffic rather than to be tidy.
     """
     v = int(value) & 0xFFFFFFFF
-    f = [0x22, 0x33, opcode, 0x01, b4, reg, sub,
-         (v >> 24) & 0xFF, (v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF]
+    f = [
+        0x22,
+        0x33,
+        opcode,
+        0x01,
+        b4,
+        reg,
+        sub,
+        (v >> 24) & 0xFF,
+        (v >> 16) & 0xFF,
+        (v >> 8) & 0xFF,
+        v & 0xFF,
+    ]
     c = crc16_modbus(f[2:11]) if crc else 0
     return bytes(f + [(c >> 8) & 0xFF, c & 0xFF, 0x66, 0x77, 0x00])
 
@@ -427,8 +454,8 @@ def band_frames(index, band):
     reg = PEQ_FIRST + index
     ftype = FILTER_TYPES[band["type"]]
     freq = int(round(band["freq"]))
-    gain = int(round(band["gain"] * 10))        # tenths of a dB, signed
-    q = int(round(band["q"] * 10000))           # x10^4
+    gain = int(round(band["gain"] * 10))  # tenths of a dB, signed
+    q = int(round(band["q"] * 10000))  # x10^4
     on = 1 if band["on"] else 0
     out = []
     for ch in (0, CHANNEL_OFFSET):
@@ -454,6 +481,7 @@ def preamp_frames(db):
 
 
 # --- device -----------------------------------------------------------------
+
 
 def _product_matches(spec, product_string):
     """True if this USB product string is one this spec claims.
@@ -491,16 +519,21 @@ def find_devices():
         # unrecognised DAC appeared as an already-confirmed one, so following
         # the documented procedure walked straight past the guard.
         key = next(
-            (k for k, v in DEVICES.items()
-             if v["pid"] == d["product_id"] and _product_matches(v, d.get("product_string"))),
+            (
+                k
+                for k, v in DEVICES.items()
+                if v["pid"] == d["product_id"] and _product_matches(v, d.get("product_string"))
+            ),
             None,
         )
-        found.append({
-            "key": key,
-            "pid": d["product_id"],
-            "product": d.get("product_string") or "?",
-            "known": key is not None,
-        })
+        found.append(
+            {
+                "key": key,
+                "pid": d["product_id"],
+                "product": d.get("product_string") or "?",
+                "known": key is not None,
+            }
+        )
     return found
 
 
@@ -514,6 +547,7 @@ def open_checked(dev_key="dx5ii"):
     reported as confident wrong values.
     """
     import hid
+
     spec = DEVICES[dev_key]
     probe = Device.__new__(Device)
     probe.spec = spec
@@ -539,27 +573,33 @@ class Device:
         if not dry_run:
             path = self._check_model()
             try:
-                self.h = hid.Device(path=path) if path else \
-                    hid.Device(self.spec["vid"], self.spec["pid"])
+                self.h = (
+                    hid.Device(path=path)
+                    if path
+                    else hid.Device(self.spec["vid"], self.spec["pid"])
+                )
             except Exception as e:
                 hint = ""
                 others = [f for f in find_devices() if not f["known"]]
                 if others:
-                    hint = ("\n\nUnrecognised Thesycon-VID devices are attached:\n" +
-                            "\n".join(f"  pid={f['pid']:#06x}  {f['product']}" for f in others) +
-                            "\nIf one is yours, see README \"Adding a device\".")
-                sys.exit(f"cannot open {self.spec['name']} "
-                         f"({self.spec['vid']:#06x}/{self.spec['pid']:#06x}): {e}\n"
-                         f"is it plugged in? if this is a permissions error, grant "
-                         f"your terminal Input Monitoring in System Settings.{hint}")
+                    hint = (
+                        "\n\nUnrecognised Thesycon-VID devices are attached:\n"
+                        + "\n".join(f"  pid={f['pid']:#06x}  {f['product']}" for f in others)
+                        + '\nIf one is yours, see README "Adding a device".'
+                    )
+                sys.exit(
+                    f"cannot open {self.spec['name']} "
+                    f"({self.spec['vid']:#06x}/{self.spec['pid']:#06x}): {e}\n"
+                    f"is it plugged in? if this is a permissions error, grant "
+                    f"your terminal Input Monitoring in System Settings.{hint}"
+                )
 
     @staticmethod
     def _normalise(name):
         """Vendor's comparison: upper-case, Roman numeral to II, alnum only."""
         if isinstance(name, bytes):
             name = name.decode("utf-8", "replace")
-        return "".join(c for c in (name or "").upper().replace("\u2161", "II")
-                       if c.isalnum())
+        return "".join(c for c in (name or "").upper().replace("\u2161", "II") if c.isalnum())
 
     def _check_model(self):
         """Refuse to drive a device whose product string is not this model.
@@ -575,10 +615,15 @@ class Device:
             entries = hid.enumerate(self.spec["vid"], self.spec["pid"])
         except Exception as e:
             sys.exit(f"cannot enumerate HID devices: {e}")
-        matched = [d for d in entries
-                   if any(self._normalise(d.get("product_string")).startswith(w)
-                          or w in self._normalise(d.get("product_string"))
-                          for w in want)]
+        matched = [
+            d
+            for d in entries
+            if any(
+                self._normalise(d.get("product_string")).startswith(w)
+                or w in self._normalise(d.get("product_string"))
+                for w in want
+            )
+        ]
         # Opening by VID/PID when several devices share it would hand back an
         # arbitrary one -- possibly the very E50 II this check exists to avoid.
         # So return a matched entry's path and open THAT, not the pair.
@@ -594,8 +639,12 @@ class Device:
             # one with IOHIDDeviceSetReport failed. Opening by VID/PID used to
             # pick whichever hidapi happened to return first, which worked by
             # luck. Choose deliberately.
-            matched.sort(key=lambda d: (d.get("usage_page") != PROTOCOL_USAGE_PAGE,
-                                        d.get("interface_number") or 0))
+            matched.sort(
+                key=lambda d: (
+                    d.get("usage_page") != PROTOCOL_USAGE_PAGE,
+                    d.get("interface_number") or 0,
+                )
+            )
             serials = {d.get("serial_number") for d in matched}
             if len(serials) > 1:
                 sys.exit(
@@ -663,14 +712,17 @@ class Device:
     def send(self, f, label=""):
         # Second line of defence: a command that forgets require_writable()
         # still cannot reach hardware.
-        if not self.dry_run and self.spec.get("status") != "confirmed" \
-                and not self.allow_unverified:
+        if (
+            not self.dry_run
+            and self.spec.get("status") != "confirmed"
+            and not self.allow_unverified
+        ):
             self._refuse_unverified()
         if self.dry_run:
             print(f"  {f.hex(' ')}  {label}")
             return
         self.h.write(self._wire(f))
-        time.sleep(0.004)      # the vendor app paces writes; don't flood the DSP
+        time.sleep(0.004)  # the vendor app paces writes; don't flood the DSP
 
     def commit(self):
         self.send(frame(REG_CTRL, SUB_COMMIT, 1), "commit")
@@ -682,13 +734,22 @@ class Device:
 
 # --- state cache ------------------------------------------------------------
 
+
 def load_state():
     try:
         with open(STATE_FILE) as fh:
             return json.load(fh)
     except (OSError, ValueError):
-        return {"bands": [dict(DEFAULT_BAND) for _ in range(BAND_COUNT)],
-                "volume_db": None, "gain": None, "source": "defaults (no cache yet)"}
+        # Sized by the module constant because no device is in scope here.
+        # vol/preamp/gain save this default as-is and show/dump read it; flat
+        # and apply resize it per device. Harmless while every model in
+        # DEVICES has 10 bands -- revisit when one doesn't.
+        return {
+            "bands": [dict(DEFAULT_BAND) for _ in range(BAND_COUNT)],
+            "volume_db": None,
+            "gain": None,
+            "source": "defaults (no cache yet)",
+        }
 
 
 def save_state(st):
@@ -701,7 +762,9 @@ def save_state(st):
 
 AUTOEQ_FILTER = re.compile(
     r"^Filter\s+\d+:\s+(ON|OFF)\s+(\w+)\s+Fc\s+([\d.]+)\s*Hz\s+"
-    r"Gain\s+(-?[\d.]+)\s*dB\s+Q\s+([\d.]+)", re.I)
+    r"Gain\s+(-?[\d.]+)\s*dB\s+Q\s+([\d.]+)",
+    re.I,
+)
 AUTOEQ_PREAMP = re.compile(r"^Preamp:\s*(-?[\d.]+)\s*dB", re.I)
 
 
@@ -728,8 +791,15 @@ def parse_autoeq(text):
         if ftype not in FILTER_TYPES:
             skipped.append(f"{ftype} @ {fc} Hz")
             continue
-        bands.append({"type": ftype, "freq": float(fc), "gain": float(gain),
-                      "q": float(q), "on": on.upper() == "ON"})
+        bands.append(
+            {
+                "type": ftype,
+                "freq": float(fc),
+                "gain": float(gain),
+                "q": float(q),
+                "on": on.upper() == "ON",
+            }
+        )
     return bands, preamp, skipped
 
 
@@ -774,6 +844,7 @@ def validate(bands, max_bands=BAND_COUNT, spec=None):
 
 
 # --- commands ---------------------------------------------------------------
+
 
 def assert_writable(args):
     """Refuse an unverified model before any I/O at all.
@@ -824,12 +895,14 @@ def cmd_apply(args):
     print(f"applying {len(bands)} filter(s) from {os.path.basename(args.file)}")
     for i, b in enumerate(bands, 1):
         state = "" if b["on"] else "  (off)"
-        print(f"  {i:2d}. {b['type']}  {b['freq']:>7.0f} Hz  "
-              f"{b['gain']:+5.1f} dB  Q {b['q']:.3f}{state}")
+        print(
+            f"  {i:2d}. {b['type']}  {b['freq']:>7.0f} Hz  "
+            f"{b['gain']:+5.1f} dB  Q {b['q']:.3f}{state}"
+        )
     # The 11th register is cleared on the wire so a stale band cannot linger,
     # but it is not a band the user can dump and re-apply. The cache keeps
     # only the usable count; validate() rejects anything longer.
-    stored = padded[:band_count(spec)]
+    stored = padded[: band_count(spec)]
     unused = len(stored) - len(bands)
     if unused:
         print(f"  {unused} unused band(s) disabled")
@@ -857,14 +930,17 @@ def cmd_apply(args):
             print("  last -- which this tool cannot read back. Positive gain with no preamp")
             print(f"  can clip. Set one first:  ./toppingctl.py preamp {-abs(boost):.1f}")
 
-    dev = Device(args.dry_run, getattr(args, "device", None),
-                 allow_unverified=getattr(args, "unverified", False))
+    dev = Device(
+        args.dry_run,
+        getattr(args, "device", None),
+        allow_unverified=getattr(args, "unverified", False),
+    )
     if preamp is not None:
         for f in preamp_frames(preamp):
             dev.send(f, f"preamp {preamp:+.1f}")
     for i, b in enumerate(padded):
         for f in band_frames(i, b):
-            dev.send(f, f"band{i+1} {b['type']}")
+            dev.send(f, f"band{i + 1} {b['type']}")
     if dx1:
         # Measured on hardware: DX1 II band/preamp writes land immediately in
         # the active slot -- no heartbeat/commit frame participates. Sending
@@ -881,8 +957,10 @@ def cmd_apply(args):
             st["preamp_db"] = preamp
         st["source"] = os.path.abspath(args.file)
         save_state(st)
-        print(f"\napplied. {len(stored)} bands written"
-              + (", committed." if not dx1 else " to the active PEQ slot."))
+        print(
+            f"\napplied. {len(stored)} bands written"
+            + (", committed." if not dx1 else " to the active PEQ slot.")
+        )
     else:
         print("\ndry run — nothing sent.")
 
@@ -890,23 +968,27 @@ def cmd_apply(args):
 def cmd_flat(args):
     assert_writable(args)
     spec = DEVICES[getattr(args, "device", None) or "dx5ii"]
+    n = band_count(spec)
     dx1 = spec.get("protocol") == "dx1"
     if dx1:
         print("DX1 II: flattening the ACTIVE PEQ config slot (one of 3).")
-    dev = Device(args.dry_run, getattr(args, "device", None),
-                 allow_unverified=getattr(args, "unverified", False))
+    dev = Device(
+        args.dry_run,
+        getattr(args, "device", None),
+        allow_unverified=getattr(args, "unverified", False),
+    )
     for i in range(REG_COUNT):
         for f in band_frames(i, DEFAULT_BAND):
-            dev.send(f, f"band{i+1} default")
+            dev.send(f, f"band{i + 1} default")
     if not dx1:
         dev.commit()
     dev.close()
     if not args.dry_run:
         st = load_state()
-        st["bands"] = [dict(DEFAULT_BAND) for _ in range(BAND_COUNT)]
+        st["bands"] = [dict(DEFAULT_BAND) for _ in range(n)]
         st["source"] = "flat"
         save_state(st)
-        print(f"all {BAND_COUNT} bands disabled.")
+        print(f"all {n} bands disabled.")
 
 
 def cmd_preamp(args):
@@ -916,12 +998,17 @@ def cmd_preamp(args):
         sys.exit(f"preamp {db} dB out of range (-40..+10)")
     v = db_to_q25(db)
     if db > 0:
-        print(f"  warning: positive preamp ({db:+.1f} dB) can clip. AutoEQ presets"
-              f" are always negative.")
+        print(
+            f"  warning: positive preamp ({db:+.1f} dB) can clip. AutoEQ presets"
+            f" are always negative."
+        )
     spec = DEVICES[getattr(args, "device", None) or "dx5ii"]
     dx1 = spec.get("protocol") == "dx1"
-    dev = Device(args.dry_run, getattr(args, "device", None),
-                 allow_unverified=getattr(args, "unverified", False))
+    dev = Device(
+        args.dry_run,
+        getattr(args, "device", None),
+        allow_unverified=getattr(args, "unverified", False),
+    )
     for f in preamp_frames(db):
         dev.send(f, f"preamp {db:+.1f} dB")
     if not dx1:
@@ -967,8 +1054,9 @@ def cmd_vol(args):
     elif not args.dry_run:
         try:
             import devstate  # local: devstate imports this module
+
             step_db = 1.0 if devstate.read_settings(key)[32] == 1 else 0.5
-        except Exception as e:                      # noqa: BLE001 - deliberate
+        except Exception as e:  # noqa: BLE001 - deliberate
             # Refuse rather than guess: a wrong scale silently doubles or
             # halves every level on a headphone amp.
             sys.exit(
@@ -981,10 +1069,12 @@ def cmd_vol(args):
     # Guard before anything is opened or sent.
     if db > VOL_WARN_DB and not args.force:
         sys.exit(f"{actual:+.1f} dB is loud — re-run with --force if you mean it")
-    dev = Device(args.dry_run, getattr(args, "device", None),
-                 allow_unverified=getattr(args, "unverified", False))
-    dev.send(frame(REG_CTRL, SUB_VOLUME, steps),
-             f"volume {actual:+.1f} dB ({step_db} dB/step)")
+    dev = Device(
+        args.dry_run,
+        getattr(args, "device", None),
+        allow_unverified=getattr(args, "unverified", False),
+    )
+    dev.send(frame(REG_CTRL, SUB_VOLUME, steps), f"volume {actual:+.1f} dB ({step_db} dB/step)")
     dev.commit()
     dev.close()
     if not args.dry_run:
@@ -1006,10 +1096,14 @@ def cmd_vol_dx1(args, spec):
     if args.db > VOL_WARN_DB and not args.force:
         sys.exit(f"{args.db:+.1f} dB is loud — re-run with --force if you mean it")
     cur = {"all": DX1_F_LOHP_VOL, "hp": DX1_F_HP_VOL, "lo": DX1_F_LO_VOL}[args.target]
-    dev = Device(args.dry_run, getattr(args, "device", None),
-                 allow_unverified=getattr(args, "unverified", False))
-    dev.send(dx1_block_frame(cur, raw),
-             f"dx1 volume {args.db:+.1f} dB (block frame {cur}, raw {raw})")
+    dev = Device(
+        args.dry_run,
+        getattr(args, "device", None),
+        allow_unverified=getattr(args, "unverified", False),
+    )
+    dev.send(
+        dx1_block_frame(cur, raw), f"dx1 volume {args.db:+.1f} dB (block frame {cur}, raw {raw})"
+    )
     dev.close()
     if not args.dry_run:
         st = load_state()
@@ -1024,14 +1118,20 @@ def cmd_mute(args):
     if spec.get("protocol") != "dx1":
         # 0x7103 exists in the vendor table but was never driven on DX5 II
         # hardware, and a mute that silently fails is worse than no mute.
-        sys.exit("mute: not implemented for the DX5 II -- register 0x7103 is "
-                 "vendor-sourced but hardware-unverified; use the vendor app "
-                 "or the remote. The DX1 II mute needs --device dx1ii --unverified.")
-    dev = Device(args.dry_run, getattr(args, "device", None),
-                 allow_unverified=getattr(args, "unverified", False))
-    dev.send(dx1_block_frame(DX1_F_MUTE, DX1_MUTE[args.state]),
-             f"dx1 mute {args.state} (block frame {DX1_F_MUTE}, "
-             f"raw {DX1_MUTE[args.state]})")
+        sys.exit(
+            "mute: not implemented for the DX5 II -- register 0x7103 is "
+            "vendor-sourced but hardware-unverified; use the vendor app "
+            "or the remote. The DX1 II mute needs --device dx1ii --unverified."
+        )
+    dev = Device(
+        args.dry_run,
+        getattr(args, "device", None),
+        allow_unverified=getattr(args, "unverified", False),
+    )
+    dev.send(
+        dx1_block_frame(DX1_F_MUTE, DX1_MUTE[args.state]),
+        f"dx1 mute {args.state} (block frame {DX1_F_MUTE}, raw {DX1_MUTE[args.state]})",
+    )
     dev.close()
     if not args.dry_run:
         print(f"mute {args.state}")
@@ -1041,11 +1141,16 @@ def cmd_input(args):
     assert_writable(args)
     spec = DEVICES[getattr(args, "device", None) or "dx5ii"]
     if spec.get("protocol") != "dx1":
-        sys.exit("input: not implemented for the DX5 II (0x7104 unverified on "
-                 "hardware); setctl.py exposes the fields that read back there.")
+        sys.exit(
+            "input: not implemented for the DX5 II (0x7104 unverified on "
+            "hardware); setctl.py exposes the fields that read back there."
+        )
     raw = 0 if args.source == "usb" else 1
-    dev = Device(args.dry_run, getattr(args, "device", None),
-                 allow_unverified=getattr(args, "unverified", False))
+    dev = Device(
+        args.dry_run,
+        getattr(args, "device", None),
+        allow_unverified=getattr(args, "unverified", False),
+    )
     dev.send(frame(*DX1_REG_INPUT, raw), f"dx1 input {args.source}")
     dev.close()
     if not args.dry_run:
@@ -1056,8 +1161,10 @@ def cmd_filter(args):
     assert_writable(args)
     spec = DEVICES[getattr(args, "device", None) or "dx5ii"]
     if spec.get("protocol") != "dx1":
-        sys.exit("filter: for the DX5 II use setctl.py pcmFilter (read-back "
-                 "verified there); this command implements the DX1 II register.")
+        sys.exit(
+            "filter: for the DX5 II use setctl.py pcmFilter (read-back "
+            "verified there); this command implements the DX1 II register."
+        )
     raw = args.filter.lower()
     if raw.startswith("f") and raw[1:].isdigit():
         raw = int(raw[1:]) - 1
@@ -1065,8 +1172,11 @@ def cmd_filter(args):
         sys.exit("filter takes f1..f8 (or 0..7)")
     if not 0 <= raw <= 7:
         sys.exit("filter takes f1..f8 (or 0..7)")
-    dev = Device(args.dry_run, getattr(args, "device", None),
-                 allow_unverified=getattr(args, "unverified", False))
+    dev = Device(
+        args.dry_run,
+        getattr(args, "device", None),
+        allow_unverified=getattr(args, "unverified", False),
+    )
     dev.send(frame(*DX1_REG_FILTER, raw), f"dx1 pcm filter f{raw + 1}")
     dev.close()
     if not args.dry_run:
@@ -1093,6 +1203,7 @@ def cmd_eq(args):
             value, label = 0, "eq on (dry-run assumes slot 1; live run reads 0x1206)"
         else:
             import devstate
+
             h = open_checked(getattr(args, "device", None) or "dx5ii")
             try:
                 val = devstate.dx1_query(h, *DX1_REG_QUERY_CFG)
@@ -1106,8 +1217,11 @@ def cmd_eq(args):
         if not 1 <= slot <= 3:
             sys.exit("eq takes on, off, or a slot number 1-3")
         value, label = slot - 1, f"eq slot {slot}"
-    dev = Device(args.dry_run, getattr(args, "device", None),
-                 allow_unverified=getattr(args, "unverified", False))
+    dev = Device(
+        args.dry_run,
+        getattr(args, "device", None),
+        allow_unverified=getattr(args, "unverified", False),
+    )
     dev.send(frame(*DX1_REG_SWITCH_CFG, value), label)
     dev.close()
     if not args.dry_run:
@@ -1118,8 +1232,11 @@ def cmd_gain(args):
     assert_writable(args)
     on = args.state == "on"
     spec = DEVICES[getattr(args, "device", None) or "dx5ii"]
-    dev = Device(args.dry_run, getattr(args, "device", None),
-                 allow_unverified=getattr(args, "unverified", False))
+    dev = Device(
+        args.dry_run,
+        getattr(args, "device", None),
+        allow_unverified=getattr(args, "unverified", False),
+    )
     if spec.get("protocol") == "dx1":
         dev.send(frame(*DX1_REG_HIGH_GAIN, 1 if on else 0), f"gain {args.state}")
     else:
@@ -1138,22 +1255,28 @@ def cmd_power(args):
     assert_writable(args)
     on = args.state == "on"
     spec = DEVICES[getattr(args, "device", None) or "dx5ii"]
-    dev = Device(args.dry_run, getattr(args, "device", None),
-                 allow_unverified=getattr(args, "unverified", False))
+    dev = Device(
+        args.dry_run,
+        getattr(args, "device", None),
+        allow_unverified=getattr(args, "unverified", False),
+    )
     if spec.get("protocol") == "dx1":
         # Standby/wake is dx1State: 2 = standby, 1 = working. No checksum, no
         # commit; the device pushes its state back. Verified asleep and awake
         # on hardware.
         dev.send(frame(*DX1_REG_STATE, 1 if on else 2), f"power {args.state}")
     else:
-        dev.send(frame(REG_CTRL, SUB_POWER, int(on), b4=SUB_POWER_B4, crc=True),
-                 f"power {args.state}")
+        dev.send(
+            frame(REG_CTRL, SUB_POWER, int(on), b4=SUB_POWER_B4, crc=True), f"power {args.state}"
+        )
     dev.close()
     if not args.dry_run:
         print(f"power {args.state}")
 
 
 def cmd_show(args):
+    spec = DEVICES[getattr(args, "device", None) or "dx5ii"]
+    n = band_count(spec)  # refuse before printing anything, like flat/apply
     st = load_state()
     print(f"last written by toppingctl (source: {st.get('source')})")
     print("the device cannot be queried — this is a cache, not a read.\n")
@@ -1165,13 +1288,17 @@ def cmd_show(args):
         print(f"  gain    {'on' if st['gain'] else 'off'}")
     print()
     active = 0
-    for i, b in enumerate(st["bands"], 1):
+    # Sliced like cmd_dump: a cache written before the 11th register was kept
+    # off the preset can hold more entries than the device has usable bands.
+    for i, b in enumerate(st["bands"][:n], 1):
         if not b["on"]:
             continue
         active += 1
-        print(f"  band {i:2d}  {b['type']}  {b['freq']:>7.0f} Hz  "
-              f"{b['gain']:+5.1f} dB  Q {b['q']:.3f}")
-    print(f"  ({active} of {BAND_COUNT} bands active)")
+        print(
+            f"  band {i:2d}  {b['type']}  {b['freq']:>7.0f} Hz  "
+            f"{b['gain']:+5.1f} dB  Q {b['q']:.3f}"
+        )
+    print(f"  ({active} of {n} bands active)")
 
 
 def cmd_dump(args):
@@ -1179,9 +1306,10 @@ def cmd_dump(args):
     # A cache written before the 11th register was kept off the preset still
     # round-trips: validate() only accepts the usable bands.
     spec = DEVICES[getattr(args, "device", None) or "dx5ii"]
-    bands = st["bands"][:band_count(spec)]
-    out = json.dumps({"bands": bands, "volume_db": st.get("volume_db"),
-                      "gain": st.get("gain")}, indent=2)
+    bands = st["bands"][: band_count(spec)]
+    out = json.dumps(
+        {"bands": bands, "volume_db": st.get("volume_db"), "gain": st.get("gain")}, indent=2
+    )
     if args.file:
         open(args.file, "w").write(out + "\n")
         print(f"wrote {args.file}")
@@ -1206,22 +1334,32 @@ def cmd_devices(args):
 
 # --- cli --------------------------------------------------------------------
 
+
 def main():
     p = argparse.ArgumentParser(
-        prog="toppingctl",
-        description="Local control for Topping DACs over USB HID.")
-    p.add_argument("--device", default="dx5ii", choices=sorted(DEVICES),
-                   help="which model to talk to (default: dx5ii)")
-    p.add_argument("--vol-step", choices=("0.5", "1.0"),
-                   help="dB per raw volume step, instead of reading it from "
-                        "the device. For models whose settings read is not "
-                        "supported but whose step is documented.")
-    p.add_argument("--unverified", action="store_true",
-                   help="allow writes to a device whose register map is "
-                        "unverified. You are asserting you will watch the "
-                        "hardware and confirm it did the right thing.")
-    p.add_argument("--dry-run", action="store_true",
-                   help="print frames instead of sending them")
+        prog="toppingctl", description="Local control for Topping DACs over USB HID."
+    )
+    p.add_argument(
+        "--device",
+        default="dx5ii",
+        choices=sorted(DEVICES),
+        help="which model to talk to (default: dx5ii)",
+    )
+    p.add_argument(
+        "--vol-step",
+        choices=("0.5", "1.0"),
+        help="dB per raw volume step, instead of reading it from "
+        "the device. For models whose settings read is not "
+        "supported but whose step is documented.",
+    )
+    p.add_argument(
+        "--unverified",
+        action="store_true",
+        help="allow writes to a device whose register map is "
+        "unverified. You are asserting you will watch the "
+        "hardware and confirm it did the right thing.",
+    )
+    p.add_argument("--dry-run", action="store_true", help="print frames instead of sending them")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     a = sub.add_parser("devices", help="list attached Thesycon-VID HID devices")
@@ -1241,14 +1379,21 @@ def main():
     a = sub.add_parser("vol", help="set volume in dB, e.g. -30")
     a.add_argument("db", type=float)
     a.add_argument("--force", action="store_true", help="allow levels above -10 dB")
-    a.add_argument("--target", choices=["all", "hp", "lo"], default="all",
-                   help="DX1 II only: which volume to set -- the knob's all "
-                        "outputs target (default), or the hp/lo memories")
+    a.add_argument(
+        "--target",
+        choices=["all", "hp", "lo"],
+        default="all",
+        help="DX1 II only: which volume to set -- the knob's all "
+        "outputs target (default), or the hp/lo memories",
+    )
     a.set_defaults(func=cmd_vol)
 
     a = sub.add_parser("mute", help="DX1 II mute: off, analog, opt, or both")
-    a.add_argument("state", choices=["off", "analog", "opt", "both"],
-                   help="off = neither, analog = hp/lo, opt = optical, both")
+    a.add_argument(
+        "state",
+        choices=["off", "analog", "opt", "both"],
+        help="off = neither, analog = hp/lo, opt = optical, both",
+    )
     a.set_defaults(func=cmd_mute)
 
     a = sub.add_parser("input", help="input source usb/opt (DX1 II)")
