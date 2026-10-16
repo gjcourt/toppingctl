@@ -13,10 +13,11 @@ provenance note and [AGENTS.md](AGENTS.md) for the protocol spec this repo
 implements.
 
 **Status:** hardware-confirmed on a Topping DX5 II (firmware 2.39, verified
-2026-08-07); the D90 III Discrete and DX1 II entries are unverified and need
-`--unverified` for writes. Installed on every `dietpi-audio` node in the homelab
-(`gjcourt/homelab`), inert until invoked. Under active development (last commit
-2026-09-29).
+2026-08-07) — only the DX5 II has been proven. The D90 III Discrete entry is
+unverified; the DX1 II entry is community-contributed and unverified. Both
+need `--unverified` for writes. Installed on every `dietpi-audio` node in the
+homelab (`gjcourt/homelab`), inert until invoked. Under active development
+(last commit 2026-09-29).
 
 ## Quick start
 

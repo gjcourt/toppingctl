@@ -60,10 +60,15 @@ def dx1_query(h, reg, sub, secs=0.7):
     clobbering. The safe set is what the vendor bundle's
     requestGroup builder allows -- 0x7100, 0x7900, 0x7d00, 0x810b, 0x810c,
     0x810a, 0x810d, 0x810e, 0x810f, 0x8200, 0x8300, 0x8400, 0x1204,
-    0x1206 -- plus the 3-slot PEQ dump 0x1106 (dx1_read_configs).
-    Everything else (gain, filter, brightness, input, display
-    mode, ...) is write-only for us; its state arrives as an unsolicited
-    push after it changes.
+    0x1206. 0x1106, the 3-slot PEQ dump (dx1_read_configs), is queried here
+    too, but it is NOT on the vendor's requestGroup list above -- it is
+    read on the strength of one contributor's unmeasured claim ("already
+    read and does not zero the slots", PR #16 review) with no recorded
+    procedure, date, or firmware version, unlike every other entry in this
+    docstring. Treat it as unverified until someone records an actual
+    before/after read of the PEQ slots on hardware. Everything else (gain,
+    filter, brightness, input, display mode, ...) is write-only for us; its
+    state arrives as an unsolicited push after it changes.
     """
     h.write(_prefixed(frame(reg, sub, 0, opcode=0x10)))
     hits = [b for b in _frames(h, secs) if b[0] == ((reg << 8) | sub) and b[2] == 1]

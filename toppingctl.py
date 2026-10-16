@@ -191,8 +191,11 @@ DEVICES = {
         # ⚠️ READS ARE WRITE-ONLY-ADJACENT HERE. A readNack is only a read for
         # the registers the vendor's own query builder allows (0x7100, 0x7900,
         # 0x7d00, 0x810b, 0x810c, 0x810a, 0x810d, 0x810e, 0x810f, 0x8200,
-        # 0x8300, 0x8400, 0x1204, 0x1206) plus the 3-slot PEQ dump 0x1106.
-        # For anything else -- gain, filter,
+        # 0x8300, 0x8400, 0x1204, 0x1206). 0x1106, the 3-slot PEQ dump, is
+        # also queried (see devstate.dx1_query) but is NOT on that vendor
+        # list -- it rests on one contributor's unmeasured claim, not a
+        # recorded hardware test. See devstate.dx1_query's docstring before
+        # trusting it. For anything else -- gain, filter,
         # brightness, input, display mode among them -- the device treats the
         # incoming readNack as a WRITE of the data field: probing with
         # data=0 resets the user's settings while "reading" -- a register
