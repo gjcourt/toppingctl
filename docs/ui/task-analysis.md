@@ -29,7 +29,7 @@ two disagree.
 | Volume (`71 02`) | **Confirmed** in the spec. Scale depends on `volumeStep`, which the tool reads first | DX1 II: a different register block, front-panel-confirmed, but the model is unverified. D90 III: not on the HID interface at all (host-side volume is the UAC2/ALSA mixer, USB input only). Read-only in the UI |
 | Headphone gain (`71 17`) | **Confirmed** | Read-only |
 | Power, sleep and wake (`71 01`) | **Confirmed** | Read-only |
-| PEQ bands and preamp (`0x91`–`0x9c`) | **Confirmed**, 10 usable bands. **Preset names aren't stored on the device** (spec §2). A bulk dump (`12 06`) returns band frequency and Q but not gain, and the spec calls that capture racy. So the UI can only show which preset toppingctl last wrote | DX1 II: the active stored slot (1–3) is readable. Read-only in the UI |
+| PEQ bands and preamp (`0x91`–`0x9c`) | **Confirmed**, 10 usable bands. **Preset names aren't stored on the device** (spec §2). A bulk dump (`12 06`) returns band frequency and Q but not gain, and the spec calls that capture racy. So the UI can only show which preset toppingctl last wrote. `toppingctl flat` writes the bands only, and leaves the preamp (`0x9c`) as it was | DX1 II: the active stored slot (1–3) is readable. Read-only in the UI |
 | Scene recall, C1/C2 (`71 11`, `71 12`) | Vendor-sourced, implemented in `scenes.py`. Not listed as confirmed in the spec's §4a | Read-only |
 | Input select (`71 04`) | Spec §4a: confidence **Medium**. `toppingctl input` refuses on the DX5 II ("0x7104 unverified on hardware"). `setctl.py inputType` can write it with a read-back check, but that verifies storage, not effect | DX1 II: `toppingctl input` writes it behind `--unverified`. Read-only in the UI |
 | Output select (`71 05`) | Spec §4a rates the observed 1–6 ordering **High**. §5 replaces it with the vendor's seven-value enum, which has no hardware rating. No toppingctl command writes it. `setctl.py outputType` can, with read-back | Read-only |
@@ -94,17 +94,17 @@ doesn't count.
 
 | Mistake | Cost | How it could happen | What the design does |
 | --- | --- | --- | --- |
-| **Loud volume into headphones** | Irreversible: hearing, drivers | Mistyped value. A slider dragged too far. A "+" step from a stale cached value. The wrong `volumeStep` scale | The slider and steppers **stop at −10 dB**. Above that, a separate **"Allow above −10 dB"** control in the room view unlocks the range for **one change**, then re-locks. A "+" step needs a volume **read from the device this session**. From a cached value, only a typed absolute target is allowed. The step size shown comes from the device read |
-| **Loud volume from a scene recall** | Same as above | C1 and C2 can hold any volume, and their contents can't be read before recall (`scenes.py`) | A recall needs its own "Allow above −10 dB for this change" tick in the preview. After a recall, if the volume ended above −10 dB, a large **"Lower to −30 dB"** button comes first, then the before/after diff |
-| **Louder after a PEQ preset change** | Loud, by the preamp difference or more | Each preset carries its own preamp (from −1.1 to −6.7 dB in `presets/`). "Flat" has none, and filters can boost | The preview states the preamp change ("Office gets at least 1.1 dB louder"). It says the change is unknown when the current preset is. Whether this also needs the unlock is question 12 |
+| **Loud volume into headphones** | Irreversible: hearing, drivers | Mistyped value. A slider dragged too far. A "+" step from a stale cached value. The wrong `volumeStep` scale | The slider and steppers **stop at −10 dB**. If a room is already louder than that, they can only go quieter. Above −10 dB, a separate **"Allow above −10 dB"** control in the room view unlocks the range for **one change**, then re-locks. A "+" step needs a volume **read from the device this session**. From a cached value, only a typed absolute target is allowed, and there is no undo back to the cached value. The step size shown comes from the device read |
+| **Loud volume from a scene recall** | Same as above | C1 and C2 can hold any volume, and their contents can't be read before recall (`scenes.py`) | A recall needs its own "Allow above −10 dB for this change" tick in the preview. As `scenes.py` does, the state is read just before and just after the recall. If the volume ended above −10 dB, a large **"Lower to −30 dB"** button comes first, then the before/after diff |
+| **Louder after a PEQ preset change** | Loud. The preamp sets the overall level, and the filters then cut or boost single frequencies on top | Each preset carries its own preamp (from −1.1 to −6.7 dB in `presets/`). Going from E3 (−1.1 dB) to Sundara (−6.7 dB) and back raises the overall level 5.6 dB. "Flat" leaves the preamp alone, so frequencies the old preset cut get louder | The preview states a preamp rise and its size in dB. For Flat, it says the preamp stays where it is. When the current preamp is unknown, the preview says the level change is unknown. Whether a rise also needs the unlock is question 12 |
 | **Gain switched to high** | Louder by an amount **not measured** here | Toggling gain on a headphone output | **Not in r1.** Gain is a loudness control and needs the same treatment as volume. See question 8 |
 | **Output moved from line to headphones at a line-level volume** | Loud | Output select | Output is read-only for now. If it is enabled later, switching to a headphone output must check the volume first |
-| **Acting on the wrong room** | Possibly loud, in someone else's ears | Remote control of a room you can't hear | The room name is in the header, in every preview, on Send, and in the step buttons' accessible names. There is no "apply to all rooms" |
-| **Writing an unconfirmed register** | Unknown device state, maybe a lost user setting | An unverified model, or a control the spec hasn't confirmed | Unverified models are **view-only**. Controls are disabled with the reason shown, not hidden (so users don't go looking for them) and not merely warned about. There is no override in the UI. `--unverified` stays a CLI-only flag |
+| **Acting on the wrong room** | Possibly loud, in someone else's ears | Remote control of a room you can't hear | The room name is in the header, in every preview, on Send, and in the accessible names of the step buttons and the slider. There is no "apply to all rooms" |
+| **Writing an unconfirmed register** | Unknown device state, maybe a lost user setting | An unverified model, or a control the spec hasn't confirmed | Unverified models are **view-only**. Their controls are shown disabled with the reason, not hidden (so users don't go looking for them) and not merely warned about. The one exception is a control the model has no register for at all, such as D90 III volume. That gets one line saying so. There is no override in the UI. `--unverified` stays a CLI-only flag |
 | **Overwriting stored scenes** | Loses the C1/C2 presets on the device | Scene save | **Absent.** One line says why, so nobody goes looking for it |
 | **Acting on stale state** | Wrong decisions, and "+" from the wrong base | Changes from the front panel, remote or vendor app are invisible to the cache | Every value carries its **source and age**: "read from device 12 s ago" or "last written by toppingctl 2 h ago, may be stale". A value nobody has ever read shows **"Unknown"**, never 0 or blank |
 | **An unreachable host mistaken for a quiet one** | Confusion, and repeated retries | Network, host down | The room card says **"Unreachable"** with the host name and when it was last seen. Its values are greyed and labelled as last known. Its controls are disabled |
-| **Dry-run skipped** | A wrong frame sent | Habit | **Every write is a preview first**: the room, the change, the frames in hex (one tap away) and then **Send**. This is the dry-run built into the flow, so there's no flag to forget. (The prototype lists frames for volume and scenes. For presets it gives a frame count only) |
+| **Dry-run skipped** | A wrong frame sent | Habit | **Every write is a preview first**: the room, the change, the frames in hex (one tap away) and then **Send**. The only exceptions are the quieter-only actions in design rule 5. This is the dry-run built into the flow, so there's no flag to forget. (The prototype lists frames for volume and scenes. For presets it only counts them: 4 preamp frames, 110 band frames and a commit) |
 
 ## Design rules that follow
 
@@ -192,11 +192,10 @@ reachability must be reported per host.
     - (b) Within the safe range (at or below −10 dB) and from a value read this session, send
       steps at once. Keep the preview for typed targets, presets, scenes and anything loud.
     - (c) Send *quieter* steps at once, and preview louder ones.
-12. **Should a preset that raises the level need the unlock?** Going from Sundara (−6.7 dB
-    preamp) to Flat makes the room at least 6.7 dB louder.
+12. **Should a preset that raises the preamp need the unlock?** Going from Sundara (−6.7 dB
+    preamp) to E3 (−1.1 dB) raises the overall level by 5.6 dB.
     - (a) Warn in the preview, with the dB difference, but don't require the unlock. *(the
       prototype's default)*
-    - (b) Require "Allow above −10 dB" when current volume plus the preamp rise would exceed
-      −10 dB.
+    - (b) Require "Allow above −10 dB" when the volume plus the preamp rise would go above −10 dB.
     - (c) Always step the volume down by the preamp difference before applying, then tell the
       user.
