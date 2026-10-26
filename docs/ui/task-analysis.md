@@ -122,6 +122,10 @@ doesn't count.
    Undo never goes back up to a loud level in one tap: that has to be set again, with the
    unlock. An undo of a preset is previewed like any other change.
 6. Only absolute targets are sent.
+   A typed level is read as **dB below 0**: "32" means −32.0 dB, with "−" shown before the
+   field. An explicit minus is still accepted, and 0 stays 0 dB. Every level is at or below
+   0 dB, and the iPhone's decimal keypad has no minus key (George's review, PR #27). The
+   −10 dB limit and its unlock apply to the result.
 7. Units on every figure (dB, with a sign), and tabular figures.
 8. Phone width first (360 px), dark mode, focusable by keyboard, real labels on controls.
 

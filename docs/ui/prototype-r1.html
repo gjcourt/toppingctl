@@ -86,7 +86,8 @@
   label.check { display: flex; gap: 10px; align-items: center; min-height: 44px; }
   label.check input { width: 22px; height: 22px; }
   .target { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
-  .target input { font: inherit; width: 100px; padding: 9px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--ink); }
+  .target .neg { font-size: 20px; font-weight: 600; margin-right: -4px; }
+  .target input { font: inherit; width: 90px; padding: 9px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--ink); }
   .err { color: var(--bad); font-size: 13px; }
   .preset { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; min-height: 44px; }
   .preset input { margin-top: 4px; width: 20px; height: 20px; }
@@ -311,8 +312,11 @@ function volumeBlock(r, w) {
   }
   html += `
     <div class="target"><label for="tgt">Set to</label>
-      <input id="tgt" type="text" class="num" inputmode="decimal" autocomplete="off" placeholder="${MINUS}30" aria-describedby="tgt-err" value="${esc(S.typed)}">
+      <span class="neg num" aria-hidden="true">${MINUS}</span>
+      <input id="tgt" type="text" class="num" inputmode="decimal" autocomplete="off" placeholder="30" aria-describedby="tgt-hint tgt-err" value="${esc(S.typed)}">
       <span>dB</span><button data-act="target">Preview</button></div>
+    <div id="tgt-hint" class="why">Levels are below 0 dB, so type how far below: 32 means ${MINUS}32.0 dB.
+      <span id="tgt-echo" class="num">${esc(echoTarget(S.typed))}</span></div>
     <div id="tgt-err" class="err">${S.volErr ? esc(S.volErr) : ""}</div>
     <label class="check"><input type="checkbox" id="unlock" ${S.unlock ? "checked" : ""}>
       <span>Allow above ${MINUS}10 dB for one change${r.output.hp ? " <strong>(output is headphones)</strong>" : ""}</span></label>
@@ -395,6 +399,27 @@ function hex(reg, sub, value) {
   const v = value >>> 0;
   const b = [0x22, 0x33, 0x20, 0x01, 0x01, reg, sub, (v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255, 0, 0, 0x66, 0x77, 0x00];
   return b.map((x) => x.toString(16).padStart(2, "0")).join(" ");
+}
+
+// "Set to" takes a magnitude: every level is at or below 0 dB, and the iPhone
+// decimal keypad has no minus key. "32" means -32 dB. An explicit minus (ASCII,
+// U+2212 or an en dash) is accepted, a trailing "dB" is ignored, and a comma
+// works as the decimal point. 0 stays 0 dB. Returns a number, or an error string.
+function parseTarget(text) {
+  let t = text.trim().replace(/\s*db$/i, "").replace(",", ".");
+  if (t === "") return "Type a level, such as 30 for " + MINUS + "30 dB.";
+  if (t.startsWith("+")) return "Levels are below 0 dB. Type 30 for " + MINUS + "30 dB.";
+  t = t.replace(/^[-\u2212\u2013]\s*/, "");
+  if (!/^\d+(\.\d*)?$|^\.\d+$/.test(t)) return "Type a level, such as 30 for " + MINUS + "30 dB.";
+  const mag = Number(t);
+  return mag === 0 ? 0 : -mag;
+}
+
+// What the field will be read as, shown while typing.
+function echoTarget(text) {
+  if (!text || !text.trim()) return "";
+  const v = parseTarget(text);
+  return typeof v === "number" ? "Reads as " + db(v) + "." : "";
 }
 
 const LOUD_MSG = "Above " + MINUS + "10 dB needs “Allow above " + MINUS + "10 dB” first.";
@@ -595,11 +620,9 @@ document.addEventListener("click", (e) => {
   else if (a === "vol") { S.volErr = stageVol(parseFloat(b.dataset.to)); }
   else if (a === "target") {
     S.typed = $("#tgt").value.trim();
-    const raw = S.typed.replace(/^[−–]/, "-");
-    const v = Number(raw);
-    S.volErr = raw === "" || isNaN(v) ? "Type a level in dB, such as " + MINUS + "30."
-      : v > 0 ? "0 dB is the loudest setting; levels are below it, such as " + MINUS + "30."
-      : stageVol(v);
+    const v = parseTarget(S.typed);
+    // The -10 dB limit and the unlock apply to the parsed result, as before.
+    S.volErr = typeof v === "string" ? v : stageVol(v);
     if (S.volErr) say(S.volErr);
   }
   else if (a === "cancel") { clearPending(); S.toast = null; focus = "h1"; }
@@ -667,6 +690,10 @@ document.addEventListener("change", (e) => {
   else if (t.id === "slider") { S.volErr = stageVol(parseFloat(t.value)); }
   else return;
   render();
+});
+
+document.addEventListener("input", (e) => {
+  if (e.target.id === "tgt") $("#tgt-echo").textContent = echoTarget(e.target.value);
 });
 
 document.addEventListener("toggle", (e) => { if (e.target.id === "frames") { S.framesOpen = e.target.open; padForBar(); } }, true);
