@@ -25,7 +25,7 @@ two disagree.
 
 | Control | DX5 II (status `confirmed`) | DX1 II, D90 III Discrete (status `unverified`) |
 | --- | --- | --- |
-| Read live state (`readsettings.py`) | Yes | DX1 II: only a read-safe register set. Elsewhere a read *is* a write, so some state (input among it) is known only from the device's own pushes. D90 III: the DX5 II settings read (`71 0c`) returns nothing. The code records a separate `0x4a` field enumeration |
+| Read live state (`readsettings.py`) | Yes | DX1 II: only a read-safe register set. Elsewhere a read *is* a write, so some state (input among it) is known only from the device's own pushes. D90 III: the DX5 II settings read (`71 0c`) returned no records when measured on 2026-08-28. The code lists that under failures from before a framing fix, so it may be out of date. The code also records a separate `0x4a` field enumeration |
 | Volume (`71 02`) | **Confirmed** in the spec. Scale depends on `volumeStep`, which the tool reads first | DX1 II: a different register block, front-panel-confirmed, but the model is unverified. D90 III: not on the HID interface at all (host-side volume is the UAC2/ALSA mixer, USB input only). Read-only in the UI |
 | Headphone gain (`71 17`) | **Confirmed** | Read-only |
 | Power, sleep and wake (`71 01`) | **Confirmed** | Read-only |

@@ -502,6 +502,7 @@ function plain(html) { const d = document.createElement("div"); d.innerHTML = ht
 function send() {
   const r = room(), p = S.pending;
   if (!writable(r)) { S.pending = null; render(); return; }
+  if (p.needsAck && !S.sceneAck) return;
   S.sending = true; render();
   setTimeout(() => {
     S.sending = false;
@@ -511,6 +512,7 @@ function send() {
       render(`[data-act="send"]`); say(plain(S.toast.html)); return;
     }
     S.pending = null; S.unlock = false; S.sceneAck = false; S.replaced = null; S.volErr = ""; S.typed = ""; r.readNote = null;
+    S.sceneResult = null; r.writes = (r.writes || 0) + 1;
     if (p.kind === "vol") {
       r.vol = { v: p.to, src: "read", age: "just now", session: true };
       // The server reads volumeStep before writing (sample value).
@@ -528,7 +530,10 @@ function send() {
         (p.from && p.from !== p.to ? ` <button class="link" data-act="undopreset" data-to="${p.from}">Undo (back to ${esc(presetName(p.from))})</button>` : "") };
     } else if (p.kind === "scene") {
       // Like scenes.py, the server reads the full state just before the recall.
-      const x = r.vol.src === "read" ? { vol: r.vol.v, input: r.input.v, output: r.output.v } : { vol: r.onRead.vol, input: r.onRead.input, output: r.onRead.output };
+      const pre = r.onRead || {};
+      const x = { vol: r.vol.src === "read" ? r.vol.v : pre.vol ?? null,
+                  input: r.input.src === "read" ? r.input.v : pre.input ?? null,
+                  output: r.output.src === "read" ? r.output.v : pre.output ?? null };
       const after = r[p.slot.toLowerCase()];
       S.sceneResult = { slot: p.slot, before: x, after };
       S.sceneErr = "";
@@ -609,16 +614,22 @@ document.addEventListener("click", (e) => {
   else if (a === "undopreset") { stagePreset(b.dataset.to); S.toast = null; }
   else if (a === "scene") { stageScene(b.dataset.slot); }
   // Sent without a preview: it can only make the room quieter.
-  else if (a === "lower") { S.unlock = false; stageVol(-30); if (S.pending) { S.pending.noUndo = true; S.sceneResult = null; send(); return; } }
-  else if (a === "restorevol") {
-    S.sceneErr = stageVol(S.sceneResult.before.vol);
-    if (!S.sceneErr) S.sceneResult = null;
+  // It replaces whatever else was pending, and sends only the −30 dB change.
+  else if (a === "lower") {
+    clearPending(); stageVol(-30);
+    if (S.pending && S.pending.kind === "vol" && S.pending.to === -30) { S.pending.noUndo = true; send(); return; }
+    S.sceneResult = null;
   }
+  // The recall card (and its loud warning) stays until a send succeeds.
+  else if (a === "restorevol") { S.sceneErr = stageVol(S.sceneResult.before.vol); }
   else if (a === "dismiss") { S.sceneResult = null; focus = "h1"; }
   else if (a === "read") {
     r.reading = true; render();
+    const writes = r.writes || 0;
     setTimeout(() => {
       r.reading = false;
+      // A send that landed while this read was in flight is newer: keep it.
+      if ((r.writes || 0) !== writes) { if (S.room === r.id) render(); return; }
       const x = r.onRead;
       const was = r.vol.v;
       r.vol = { v: x.vol, src: "read", age: "just now", session: true }; r.step = { v: x.step, src: "read" };
