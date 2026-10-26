@@ -299,7 +299,7 @@ came from.
 | `GET /v1/room` | Identity: host, room, product string, `DEVICES` key, `status`, capabilities, `mode` (dry-run or live), agent version |
 | `GET /v1/state?fresh=1` | Current state. Every field is `{value, source: "device" \| "written" \| "unknown", at}`. `fresh=1` forces a GetSettings read. Without it, the cached read comes back with its age |
 | `POST /v1/plans` | `{op, args, expected}`. The agent reads the device, applies the rules and builds the frames, then returns `{plan_id, summary, before, after_predicted, frames[], needs_unlock, expires_at}`. Nothing is sent |
-| `POST /v1/plans/{id}/send` | `{allow_loud?}`. The agent re-reads. If any field **the operation depends on** differs from the plan's `before`, it returns `409 changed`, sends nothing, and discards the plan. By default that means volume, `volumeStep`, gain, output and power, for every operation. `preset.apply` depends on volume too, through the preamp-rise rule. Fields such as `sampleRate` change with playback and are ignored. Otherwise it sends exactly the planned frames, reads again, and returns `{before, after, loud_result, undo}`, all under one device open and one lock |
+| `POST /v1/plans/{id}/send` | `{allow_loud?}`. The agent re-reads. If any field **the operation depends on** differs from the plan's `before`, it returns `409 changed`, sends nothing, and discards the plan. By default that means volume, `volumeStep`, gain, output and power, for every operation. Volume is in the set for presets too, because of the preamp-rise rule. Fields such as `sampleRate` change with playback and are ignored. Otherwise it sends exactly the planned frames, reads again, and returns `{before, after, loud_result, undo}`, all under one device open and one lock |
 | `POST /v1/plans/{id}/cancel` | Discards the plan, and its unlock with it |
 | `POST /v1/volume` | Fast path only: a safe step, `quieter_only`, or a safe `undo`. Everything else is refused with a pointer to `/v1/plans` |
 
@@ -321,7 +321,7 @@ George is the only user (decision 6), but there are still several writers.
 | Writer | What the plan does |
 | --- | --- |
 | George on two devices (phone and laptop tabs) | Compare-and-set. Every write carries `expected`, and the agent checks it against a fresh read. A mismatch returns `409` with the new state, and the UI says "Changed elsewhere: now −24.0 dB (read 0 s ago)". It doesn't resend |
-| The CLI on the same host | **(proposal)** An advisory `flock` on `device.lock` in the state directory, taken **once per command or agent operation**, at the top. It isn't taken per open: `cmd_vol`, for example, reads `volumeStep` and closes before it opens the writer, and a per-open lock would let another process slip in between that read and the write. A lock helper in `toppingctl.py` is taken by **every** entry point that writes: `toppingctl.py`, `scenes.py`, `setctl.py`, `probe.py`, `smoke.py` and the agent. The lock path is fixed per platform (`/var/lib/toppingctl/device.lock` on Linux, `~/.toppingctl/device.lock` elsewhere). It doesn't follow `TOPPINGCTL_STATE_DIR`, so a CLI run under `sudo` without the wrapper still contends for the same lock. The CLI waits a few seconds and then says "toppingd is using the DAC". The agent opens the device per operation and closes it after, so the CLI works whenever the agent is idle |
+| The CLI on the same host | **(proposal)** An advisory `flock` on a fixed `device.lock`, taken **once per command or agent operation**, at the top. It isn't taken per open: `cmd_vol`, for example, reads `volumeStep` and closes before it opens the writer, and a per-open lock would let another process slip in between that read and the write. A lock helper in `toppingctl.py` is taken by **every entry point that opens the device**, because the device grants one handle: `toppingctl.py`, `scenes.py`, `setctl.py`, `probe.py`, `smoke.py`, `meters.py`, `listen.py`, `readsettings.py`/`devstate.py`, and the agent. The lock path is fixed: `/var/lib/toppingctl/device.lock` when that directory exists (every node, and any other agent host, which the agent's install creates), otherwise `~/.toppingctl/device.lock` (a CLI-only machine such as a Mac). It doesn't follow `TOPPINGCTL_STATE_DIR`, so a CLI run under `sudo` without the wrapper still contends for the same lock. If the lock file can't be opened (for example, a user outside the `toppingd` group), the CLI refuses to write and says why. Reads warn and continue. The CLI waits a few seconds and then says "toppingd is using the DAC". The agent opens the device per operation and closes it after, so the CLI works whenever the agent is idle |
 | Front panel, IR remote, Home Assistant's IR blaster | Invisible until the next read. The agent reads before every plan, every Send and every fast step. While a UI is open on a room, `toppingweb` polls `state?fresh=1` (proposal: every 10 s, one poller per room however many tabs are open). With no viewer, it doesn't poll. At 2 s per read, that polling holds the DAC about 20 % of the time, which is another reason for the early-stopping read |
 | Vendor web app | The code already records that the vendor app takes the device and "only one client gets it" (`devstate.py:128–130`). The agent retries an open a few times, as `read_settings` does, then reports "The DAC is in use by another app" and disables writes. The flock can't cover the vendor app, so between two of the agent's operations it can take the device. That is why every operation re-reads. If the DAC is plugged into another computer, the agent reports "No DAC found" |
 | PEQ writes in progress | A preset is 110 band frames, 4 preamp frames and a commit. Under the per-device lock, nothing else interleaves. If the HID write fails partway, the result says "Preset partly written. Re-apply or apply Flat" and the preset record is set to `unknown`, not to the new name |
@@ -451,7 +451,8 @@ All of these run offline in CI and call the agent API, not the UI:
   refused above −10 dB, or when the level has changed since the change it undoes.
 - Send ignores changes to fields the operation doesn't depend on, such as `sampleRate`.
 - Signature failures, replayed nonces, skewed timestamps and timestamps from before the
-  first NTP sync are rejected, on requests and on responses. The tests include a clock that
+  first NTP sync are rejected by the agent, and `toppingweb` rejects any response whose nonce
+  isn't the one it sent. The tests include a clock that
   starts in the past and then syncs, and a response replayed against a different request
   nonce.
 - In `mode: dry-run`, no route sends a frame.
@@ -489,7 +490,8 @@ All of these run offline in CI and call the agent API, not the UI:
      This is faster, but it accepts the jump above. Choosing it replaces rule (c) of the
      fast-step row and its test.
    - (c) (a), but taps made while a step is in flight queue up. Each is still sent as a single
-     `volumeStep`, checked against its own read, so rapid taps take one read each.
+     `volumeStep`, checked against its own read, with its `expected_db` set to the previous
+     step's confirmed result, so rapid taps take one read each.
 5. **How long is the unlock's "short timeout"?**
    - (a) 30 s.
    - (b) 60 s. *(proposal)*
