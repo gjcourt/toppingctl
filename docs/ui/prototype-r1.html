@@ -31,7 +31,7 @@
     margin: 0; background: var(--bg); color: var(--ink);
     font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
-  .wrap { max-width: 520px; margin: 0 auto; padding: 0 14px 160px; }
+  .wrap { max-width: 520px; margin: 0 auto; padding: 0 14px 40px; }
   .num { font-variant-numeric: tabular-nums; }
   .sample {
     position: sticky; top: 0; z-index: 5; background: var(--warn-bg); color: var(--warn);
@@ -46,14 +46,14 @@
   }
   button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
   button.loud { background: var(--warn-bg); color: var(--warn); border-color: var(--warn); font-weight: 600; }
-  button:disabled { opacity: .45; cursor: not-allowed; }
+  button:disabled, button[aria-disabled=true] { opacity: .45; cursor: not-allowed; }
   :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
-  .link { background: none; border: none; color: var(--accent); padding: 4px 0; min-height: 0; }
+  .link { background: none; border: none; color: var(--accent); padding: 10px 4px; min-height: 44px; text-decoration: underline; }
   .card {
     background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
     padding: 14px; margin: 10px 0;
   }
-  button.card { display: block; width: 100%; text-align: left; }
+  a.card { display: block; color: inherit; text-decoration: none; }
   .row { display: flex; align-items: baseline; gap: 8px; }
   .row .grow { flex: 1; }
   .title { font-weight: 650; font-size: 18px; }
@@ -112,9 +112,10 @@
 <div class="sample" role="note">Prototype r1 · <strong>sample data</strong>. Rooms, hosts and values are invented. Nothing here talks to a DAC.</div>
 <div class="wrap">
   <main id="app"></main>
+  <div id="pending" class="pending" hidden></div>
+  <div id="proto"></div>
   <div id="live" aria-live="polite" style="position:absolute;left:-9999px"></div>
 </div>
-<div id="pending" class="pending" hidden></div>
 
 <script>
 "use strict";
@@ -125,19 +126,19 @@ const VOL_MIN = -99;
 // Real preset files from presets/ (names from presets/README.md). Which one a
 // room "has" is invented sample data.
 const PRESETS = [
-  { id: "flat", name: "Flat: no correction", detail: "All bands off" },
-  { id: "e3-oratory-harman-oe", name: "Dan Clark Audio E3 · Harman OE", detail: "10 filters, preamp " + MINUS + "1.1 dB" },
-  { id: "sundara-post2020pads-oratory-harman-oe", name: "HiFiMan Sundara · Harman OE", detail: "10 filters, preamp " + MINUS + "6.7 dB" },
-  { id: "zero-red-crinacle-harman-ie", name: "Truthear Zero:RED · Harman IE", detail: "10 filters, preamp " + MINUS + "3.3 dB" },
+  { id: "flat", name: "Flat: no correction", detail: "All bands off, no preamp", pre: 0 },
+  { id: "e3-oratory-harman-oe", name: "Dan Clark Audio E3 · Harman OE", detail: "10 filters, preamp " + MINUS + "1.1 dB", pre: -1.1 },
+  { id: "sundara-post2020pads-oratory-harman-oe", name: "HiFiMan Sundara · Harman OE", detail: "10 filters, preamp " + MINUS + "6.7 dB", pre: -6.7 },
+  { id: "zero-red-crinacle-harman-ie", name: "Truthear Zero:RED · Harman IE", detail: "10 filters, preamp " + MINUS + "3.3 dB", pre: -3.3 },
 ];
 
-const NOT_CONFIRMED = "Not confirmed on DX5 II hardware yet, so it can't be changed from here. Use the remote or front panel.";
+const NOT_CONFIRMED = "Not confirmed on DX5 II hardware yet, so it can't be changed from here. Use the remote, front panel or vendor app.";
 const VIEW_ONLY = "View only: this model isn't confirmed for toppingctl.";
 
 function sampleRooms() {
   return [
     { id: "office", name: "Office", model: "Topping DX5 II", host: "office-audio", status: "confirmed", reach: "ok",
-      vol: { v: -32, src: "read", age: "12 s ago" }, step: { v: 0.5, src: "read" },
+      vol: { v: -32, src: "read", age: "12 s ago", session: true }, step: { v: 0.5, src: "read" },
       input: { v: "USB", src: "read", age: "12 s ago" }, output: { v: "Headphones, balanced", hp: true, src: "read", age: "12 s ago" },
       mute: { v: "Not muted", src: "read", age: "12 s ago" },
       preset: { v: "e3-oratory-harman-oe", src: "written", age: "2 h ago" },
@@ -151,15 +152,15 @@ function sampleRooms() {
       c1: { vol: -20, input: "Optical", output: "Line out, balanced" },
       c2: { vol: -20, input: "Optical", output: "Line out, balanced" } },
     { id: "bedroom", name: "Bedroom", model: "Topping DX1 II", host: "bedroom-audio", status: "unverified", reach: "ok",
-      vol: { v: -40, src: "read", age: "8 s ago" }, step: { v: null, src: "unknown" },
-      input: { v: "USB", src: "read", age: "8 s ago" }, output: { v: "Headphones", hp: true, src: "read", age: "8 s ago" },
+      vol: { v: -40, src: "read", age: "8 s ago", session: true }, step: { v: null, src: "unknown" },
+      input: { v: null, src: "na", note: "Only known when the DAC pushes a change. On this model, asking for it would overwrite it." }, output: { v: "Headphones", hp: true, src: "read", age: "8 s ago" },
       mute: { v: "Not muted", src: "read", age: "8 s ago" }, preset: { v: null, src: "unknown" } },
     { id: "den", name: "Den", model: "Topping D90 III Discrete", host: "den-audio", status: "unverified", reach: "ok",
-      vol: { v: null, src: "na", note: "Not available over USB on this model: knob and remote only." },
+      vol: { v: null, src: "na", note: "Not on this model's control interface. Use the knob, the remote, or the computer's USB-audio volume." },
       step: { v: null, src: "unknown" },
-      input: { v: null, src: "na", note: "This model doesn't answer the settings read." },
-      output: { v: null, src: "na", note: "This model doesn't answer the settings read." },
-      mute: { v: null, src: "na", note: "This model doesn't answer the settings read." },
+      input: { v: null, src: "na", note: "Not read: this model doesn't answer the DX5 II settings read." },
+      output: { v: null, src: "na", note: "Not read: this model doesn't answer the DX5 II settings read." },
+      mute: { v: null, src: "na", note: "Not read: this model doesn't answer the DX5 II settings read." },
       preset: { v: null, src: "unknown" } },
     { id: "studio", name: "Studio", model: "Topping DX5 II", host: "studio-audio", status: "confirmed", reach: "down",
       lastSeen: "3 h ago, at 14:02",
@@ -171,13 +172,13 @@ function sampleRooms() {
 
 let S;
 function reset() {
-  S = { view: "signin", room: null, rooms: sampleRooms(), pending: null, unlock: false,
-        toast: null, sending: false, failNext: false, reading: false, readNote: null, sceneResult: null };
+  S = { view: "signin", room: null, rooms: sampleRooms(), pending: null, unlock: false, sceneAck: false,
+        replaced: null, toast: null, sending: false, failNext: false, sceneResult: null };
 }
 reset();
 
 const $ = (s) => document.querySelector(s);
-const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const esc = (s) => (s === null || s === undefined ? "Unknown" : String(s)).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const room = () => S.rooms.find((r) => r.id === S.room);
 const writable = (r) => r.status === "confirmed" && r.reach === "ok";
 function db(v) {
@@ -219,7 +220,7 @@ function viewList() {
     const out = r.output.v ? r.output.v : (r.output.src === "na" ? "Output not readable" : "Output unknown");
     const pre = r.preset.v ? presetName(r.preset.v) + " (last written)" : "EQ preset unknown";
     return `
-    <button class="card ${down ? "stale" : ""}" data-act="open" data-id="${r.id}" aria-label="${esc(r.name)}: ${down ? "unreachable" : "reachable"}, volume ${esc(db(r.vol.v))}">
+    <a class="card ${down ? "stale" : ""}" href="#${r.id}" data-act="open" data-id="${r.id}">
       <div class="row"><span class="title grow">${esc(r.name)}</span>
         ${r.status !== "confirmed" ? `<span class="pill view">View only</span>` : ""} ${reachPill(r)}</div>
       <div class="sub">${esc(r.model)} · ${esc(r.host)}</div>
@@ -227,12 +228,11 @@ function viewList() {
       <div class="row" style="margin-top:8px"><span class="big num val">${esc(db(r.vol.v))}</span></div>
       <div>${prov(r.vol, r)}</div>
       <div class="sub val" style="margin-top:6px">${esc(out)} · ${esc(pre)}</div>
-    </button>`;
+    </a>`;
   }).join("");
   return `
   <header><h1>Rooms</h1><div class="who">george (sample)<br>via LAN (sample) · <button class="link" data-act="signout">Sign out</button></div></header>
-  ${cards}
-  ${protoControls()}`;
+  ${cards}`;
 }
 
 function viewRoom() {
@@ -250,7 +250,7 @@ function viewRoom() {
       Only the DX5 II has been checked against real hardware.</div>`;
   }
   return `
-  <header><button data-act="back" aria-label="Back to rooms">‹ Rooms</button>
+  <header><button data-act="back" aria-label="Back to rooms" ${S.sending ? "disabled" : ""}>‹ Rooms</button>
     <div style="flex:1"><h1>${esc(r.name)}</h1><div class="sub">${esc(r.model)} · ${esc(r.host)}</div></div>${reachPill(r)}</header>
   ${banner}
   ${S.toast ? `<div class="banner ${S.toast.kind} toast" role="status">${S.toast.html}</div>` : ""}
@@ -266,42 +266,42 @@ function viewRoom() {
   <h2>EQ preset</h2>
   <div class="card">${presetBlock(r, w)}</div>
   <h2>Scenes</h2>
-  <div class="card">${sceneBlock(r, w)}</div>
-  ${protoControls()}`;
+  <div class="card">${sceneBlock(r, w)}</div>`;
 }
 
 function volumeBlock(r, w) {
   const v = S.pending && S.pending.kind === "vol" ? S.pending.to : r.vol.v;
-  let html = `<div class="big num val" aria-live="polite">${esc(db(r.vol.v))}</div><div>${prov(r.vol, r)}</div>`;
-  if (S.readNote) html += `<div class="banner warn">${S.readNote}</div>`;
+  let html = `<div class="big num val">${esc(db(r.vol.v))}</div><div>${prov(r.vol, r)}</div>`;
+  if (r.readNote) html += `<div class="banner warn">${r.readNote}</div>`;
   if (!w) {
     const why = r.reach === "down" ? "Can't change: the host isn't answering." : r.vol.src === "na" ? "" : VIEW_ONLY;
     return html + (why ? `<div class="why">${why}</div>` : "");
   }
-  const fresh = r.vol.src === "read";
+  // "+"/"-" need a value read from the device this session, not just any read.
+  const fresh = r.vol.src === "read" && r.vol.session;
   const step = r.step.v;
   const max = S.unlock ? 0 : SAFE_MAX;
   if (fresh) {
     const down = Math.max(VOL_MIN, v - step), up = v + step;
     html += `
     <div class="stepper">
-      <button data-act="vol" data-to="${down}" aria-label="Quieter by ${step} dB">${MINUS}</button>
+      <button data-act="vol" data-key="down" data-to="${down}" aria-label="${esc(r.name)}: quieter by ${step} dB">${MINUS}</button>
       <div>
         <input type="range" id="slider" aria-label="Volume, dB" min="${VOL_MIN}" max="${max}" step="${step}" value="${Math.min(v, max)}">
         <div class="scale num"><span>${MINUS}99 dB</span><span>${S.unlock ? "0 dB" : MINUS + "10 dB (limit)"}</span></div>
       </div>
-      <button data-act="vol" data-to="${up}" aria-label="Louder by ${step} dB" ${up > max ? "disabled" : ""}>+</button>
+      <button data-act="vol" data-key="up" data-to="${up}" aria-label="${esc(r.name)}: louder by ${step} dB" ${up > max ? "disabled" : ""}>+</button>
     </div>
-    <div class="why">Steps of ${step} dB, read from the device.${up > max && !S.unlock ? " Louder than " + MINUS + "10 dB needs the switch below." : ""}</div>`;
+    <div class="why">Steps of ${step} dB, read from the device.${up > max && !S.unlock ? " Louder than " + MINUS + "10 dB needs the checkbox below." : ""}</div>`;
   } else {
     html += `<div class="why">The +/${MINUS} buttons need a volume read from the device: stepping from a stale value could land somewhere louder than you think.</div>
-      <div style="margin-top:8px"><button data-act="read" ${S.reading ? "disabled" : ""}>${S.reading ? "Reading " + esc(r.host) + "…" : "Read " + esc(r.name) + " now"}</button></div>`;
+      <div style="margin-top:8px"><button data-act="read" ${r.reading ? "disabled" : ""}>${r.reading ? "Reading " + esc(r.host) + "…" : "Read " + esc(r.name) + " now"}</button></div>`;
   }
   html += `
     <div class="target"><label for="tgt">Set to</label>
-      <input id="tgt" class="num" inputmode="decimal" placeholder="${MINUS}30" aria-describedby="tgt-err">
+      <input id="tgt" type="text" class="num" inputmode="decimal" autocomplete="off" placeholder="${MINUS}30" aria-describedby="tgt-err">
       <span>dB</span><button data-act="target">Preview</button></div>
-    <div id="tgt-err" class="err" role="alert"></div>
+    <div id="tgt-err" class="err"></div>
     <label class="check"><input type="checkbox" id="unlock" ${S.unlock ? "checked" : ""}>
       <span>Allow above ${MINUS}10 dB for one change${r.output.hp ? " <strong>(output is headphones)</strong>" : ""}</span></label>
     ${S.unlock ? `<div class="banner warn">Unlocked for the next change only. It locks again after you send or cancel.</div>` : ""}`;
@@ -312,9 +312,9 @@ function fieldRow(label, f, r, w) {
   let why = "";
   if (r.reach === "down") why = "Can't change: the host isn't answering.";
   else if (r.status !== "confirmed") why = VIEW_ONLY;
-  else why = label === "Mute" ? "Mute isn't implemented for the DX5 II: the register was never tested on hardware. Use the remote." : NOT_CONFIRMED;
+  else why = label === "Mute" ? "Mute isn't implemented for the DX5 II: the register was never tested on hardware. Use the remote or the vendor app." : NOT_CONFIRMED;
   return `<div class="field"><span class="label">${label}</span>
-    <button disabled aria-describedby="why-${label}">Change</button>
+    <button aria-disabled="true" aria-describedby="why-${label}">Change ${label.toLowerCase()}</button>
     <span class="val">${f.v ? esc(f.v) : "Unknown"}</span><span></span>
     <span style="grid-column:1/-1">${prov(f, r)}</span>
     <div class="why" id="why-${label}">${why}</div></div>`;
@@ -324,13 +324,13 @@ function presetBlock(r, w) {
   const cur = r.preset.v;
   let html = `<div>${cur ? "Current: <strong>" + esc(presetName(cur)) + "</strong>" : "Current: <strong>Unknown</strong>"}</div>
     <div>${prov(r.preset, r)}</div>
-    <div class="why">The DAC can't report which filters are loaded, so this is only ever what toppingctl last wrote.</div>`;
+    <div class="why">The DAC doesn't store preset names, so this is what toppingctl last wrote. Anything changed since on the front panel or in the vendor app won't show here.</div>`;
   if (!w) return html + `<div class="why">${r.reach === "down" ? "Can't change: the host isn't answering." : VIEW_ONLY}</div>`;
   html += `<fieldset style="border:none;padding:0;margin:8px 0 0"><legend class="sub">Apply a preset</legend>` +
     PRESETS.map((p) => {
       const sel = S.pending && S.pending.kind === "preset" ? S.pending.to === p.id : false;
-      return `<label class="preset"><input type="radio" name="preset" value="${p.id}" ${sel ? "checked" : ""} ${p.id === cur ? "disabled" : ""}>
-        <span><span>${esc(p.name)}</span>${p.id === cur ? " <span class='pill view'>current</span>" : ""}<br><span class="sub">${esc(p.detail)}</span></span></label>`;
+      return `<label class="preset"><input type="radio" name="preset" value="${p.id}" ${sel ? "checked" : ""}>
+        <span><span>${esc(p.name)}</span>${p.id === cur ? " <span class='pill view'>last written · re-apply</span>" : ""}<br><span class="sub">${esc(p.detail)}</span></span></label>`;
     }).join("") + `</fieldset>`;
   return html;
 }
@@ -349,18 +349,18 @@ function sceneResultView(r) {
   const x = S.sceneResult;
   const loud = x.after.vol > SAFE_MAX;
   const rows = [
-    ["Volume", db(x.before.vol), db(x.after.vol), loud ? "Loud" : ""],
+    ["Volume", db(x.before.vol) + (x.beforeRead ? "" : " (last written, may be stale)"), db(x.after.vol), loud ? "Loud" : ""],
     ["Input", x.before.input, x.after.input, "Can't restore from here"],
     ["Output", x.before.output, x.after.output, "Can't restore from here"],
-    ["EQ", "", "Can't be read back", ""],
+    ["EQ", "", "Not known: the scene may have changed it", ""],
   ].filter((row) => row[1] !== row[2]);
   return `<div class="card" role="status">
     <div class="title">Recalled ${x.slot} on ${esc(r.name)}</div>
-    <div class="sub">What changed, read from the device after the recall:</div>
-    <table class="diff num"><tbody>${rows.map((row) => `<tr><td>${row[0]}</td><td>${esc(row[1]) || "—"} → <strong>${esc(row[2])}</strong></td><td class="sub">${row[3]}</td></tr>`).join("")}</tbody></table>
     ${loud ? `<div class="banner warn"><strong>${esc(r.name)} is at ${esc(db(x.after.vol))}</strong>, louder than ${MINUS}10 dB.</div>
       <button class="loud" style="width:100%" data-act="lower">Lower ${esc(r.name)} to ${MINUS}30.0 dB now</button>` : ""}
-    <div style="margin-top:8px"><button data-act="restorevol">Put volume back to ${esc(db(x.before.vol))}</button>
+    <div class="sub" style="margin-top:8px">What changed, read from the device after the recall:</div>
+    <table class="diff num"><tbody>${rows.map((row) => `<tr><td>${row[0]}</td><td>${row[1] === "" ? "—" : esc(row[1])} → <strong>${esc(row[2])}</strong></td><td class="sub">${row[3]}</td></tr>`).join("")}</tbody></table>
+    <div style="margin-top:8px">${x.beforeRead && x.before.vol !== null ? `<button data-act="restorevol">Put volume back to ${esc(db(x.before.vol))}</button>` : ""}
       <button class="link" data-act="dismiss">Dismiss</button></div>
   </div>`;
 }
@@ -385,11 +385,13 @@ function stageVol(to) {
   // An unread step can't be shown; the server reads volumeStep just before it
   // writes, as `toppingctl vol` does. 0.5 is only for the preview's rounding.
   const step = r.step.v || 0.5;
-  to = Math.round(to / step) * step;
   const max = S.unlock ? 0 : SAFE_MAX;
+  if (to > max) return "Above " + MINUS + "10 dB needs “Allow above " + MINUS + "10 dB” first.";
+  to = Math.round(to / step) * step;
   if (to > max) return "Above " + MINUS + "10 dB needs “Allow above " + MINUS + "10 dB” first.";
   if (to < VOL_MIN) return "The quietest setting is " + MINUS + "99.0 dB.";
   if (to === r.vol.v) { S.pending = null; return ""; }
+  replacing("vol");
   const steps = Math.round(-to / step);
   S.pending = { kind: "vol", from: r.vol.v, to, loud: to > SAFE_MAX,
     what: `Set ${r.name} volume ${db(r.vol.v)} → ${db(to)}`,
@@ -399,15 +401,27 @@ function stageVol(to) {
   return "";
 }
 
+function replacing(kind) {
+  S.replaced = S.pending && S.pending.kind !== kind ? S.pending.what : null;
+  if (kind !== "scene") S.sceneAck = false;
+}
+
 function stagePreset(id) {
   const r = room();
-  S.pending = { kind: "preset", from: r.preset.v, to: id,
-    what: `Apply “${presetName(id)}” to ${r.name}`,
+  replacing("preset");
+  const from = PRESETS.find((p) => p.id === r.preset.v), to = PRESETS.find((p) => p.id === id);
+  // A lower (less negative) preamp makes the room louder; filter boosts can add more.
+  const louder = !from ? "The current preamp is unknown, so the level change is unknown."
+    : to.pre > from.pre ? `Preamp goes from ${db(from.pre)} to ${db(to.pre)}: ${r.name} gets at least ${(to.pre - from.pre).toFixed(1)} dB louder.` : "";
+  S.pending = { kind: "preset", from: r.preset.v, to: id, louder,
+    what: `${id === r.preset.v ? "Re-apply" : "Apply"} “${presetName(id)}” to ${r.name}`,
     frames: "100 band frames + preamp + commit. The production build lists them all, as toppingctl --dry-run does; this prototype doesn't." };
 }
 
 function stageScene(slot) {
   const r = room();
+  replacing("scene");
+  S.sceneAck = false;
   S.pending = { kind: "scene", slot, needsAck: true,
     what: `Recall scene ${slot} on ${r.name}`,
     frames: `${hex(0x71, slot === "C1" ? 0x11 : 0x12, 1)}   recall ${slot}\n${hex(0x71, 0x34, 1)}   commit` };
@@ -416,24 +430,31 @@ function stageScene(slot) {
 function renderPending() {
   const el = $("#pending");
   const p = S.pending;
-  if (!p || S.view !== "room") { el.hidden = true; el.innerHTML = ""; return; }
+  if (!p || S.view !== "room") { el.hidden = true; el.innerHTML = ""; $(".wrap").style.paddingBottom = ""; return; }
   const r = room();
-  const blocked = p.needsAck && !S.unlock;
+  const blocked = p.needsAck && !S.sceneAck;
+  const fresh = el.hidden;
   el.hidden = false;
   el.innerHTML = `<div class="in" role="region" aria-label="Pending change">
     <div class="tag">${S.sending ? "Sending…" : "Preview · nothing sent yet"}</div>
     <div class="what num">${esc(p.what)}</div>
+    ${S.replaced ? `<div class="sub">Replaces the change you had pending: ${esc(S.replaced)}</div>` : ""}
     ${p.loud ? `<div class="banner warn">Above ${MINUS}10 dB${r.output.hp ? ", into headphones" : ""}.</div>` : ""}
-    ${p.needsAck ? `<label class="check"><input type="checkbox" id="unlock2" ${S.unlock ? "checked" : ""}>
+    ${p.louder ? `<div class="banner warn">${esc(p.louder)}</div>` : ""}
+    ${p.needsAck ? `<label class="check"><input type="checkbox" id="unlock2" ${S.sceneAck ? "checked" : ""}>
       <span>Allow above ${MINUS}10 dB for this change. ${p.slot}'s volume is unknown until it's recalled.</span></label>` : ""}
     <details><summary>Frames to send</summary><pre>${esc(p.frames)}</pre></details>
     <div class="acts"><button data-act="cancel" ${S.sending ? "disabled" : ""}>Cancel</button>
       <button class="primary" data-act="send" ${S.sending || blocked ? "disabled" : ""}>${S.sending ? "Sending to " + esc(r.host) + "…" : "Send to " + esc(r.name)}</button></div>
   </div>`;
+  // The bar is fixed, so make room for it under the page.
+  $(".wrap").style.paddingBottom = el.offsetHeight + 24 + "px";
+  if (fresh) say("Preview ready: " + p.what + ". Nothing sent yet. Send and Cancel follow the page.");
 }
 
 function send() {
   const r = room(), p = S.pending;
+  if (!writable(r)) { S.pending = null; render(); return; }
   S.sending = true; render();
   setTimeout(() => {
     S.sending = false;
@@ -442,22 +463,25 @@ function send() {
       S.toast = { kind: "bad", html: `<strong>Couldn't reach ${esc(r.host)}.</strong> Nothing was changed. Your change is still waiting below; try sending it again.` };
       render(); say("Send failed. Nothing was changed."); return;
     }
-    S.pending = null; S.unlock = false; S.readNote = null;
+    S.pending = null; S.unlock = false; S.sceneAck = false; S.replaced = null; r.readNote = null;
     if (p.kind === "vol") {
-      r.vol = { v: p.to, src: "read", age: "just now" };
+      r.vol = { v: p.to, src: "read", age: "just now", session: true };
       S.toast = { kind: "info", html: `${esc(r.name)} is now <strong class="num">${esc(db(p.to))}</strong>, read back from the device.` +
         (p.from !== null && !p.noUndo ? ` <button class="link" data-act="undo" data-to="${p.from}">Undo (back to ${esc(db(p.from))})</button>` : "") };
     } else if (p.kind === "preset") {
       r.preset = { v: p.to, src: "written", age: "just now" };
       S.toast = { kind: "info", html: `Applied “${esc(presetName(p.to))}” to ${esc(r.name)}.` +
-        (p.from ? ` <button class="link" data-act="undopreset" data-to="${p.from}">Undo (back to ${esc(presetName(p.from))})</button>` : "") };
+        (p.from && p.from !== p.to ? ` <button class="link" data-act="undopreset" data-to="${p.from}">Undo (back to ${esc(presetName(p.from))})</button>` : "") };
     } else if (p.kind === "scene") {
       const after = r[p.slot.toLowerCase()];
-      S.sceneResult = { slot: p.slot, before: { vol: r.vol.v, input: r.input.v, output: r.output.v }, after };
-      r.vol = { v: after.vol, src: "read", age: "just now" };
-      r.input = { ...r.input, v: after.input, age: "just now" };
-      r.output = { ...r.output, v: after.output, hp: after.output.startsWith("Headphones"), age: "just now" };
-      r.preset = { v: null, src: "unknown" };
+      S.sceneResult = { slot: p.slot, beforeRead: r.vol.src === "read",
+        before: { vol: r.vol.v, input: r.input.v, output: r.output.v }, after };
+      r.vol = { v: after.vol, src: "read", age: "just now", session: true };
+      // The read after a recall returns volumeStep too (sample value).
+      if (!r.step.v) r.step = { v: 0.5, src: "read" };
+      r.input = { v: after.input, src: "read", age: "just now" };
+      r.output = { v: after.output, hp: after.output.startsWith("Headphones"), src: "read", age: "just now" };
+      r.preset = { v: null, src: "na", note: `Unknown: scene ${p.slot} may have changed the EQ.` };
       S.toast = null;
     }
     render(); say("Sent.");
@@ -466,54 +490,69 @@ function send() {
 
 // --- events ----------------------------------------------------------------
 
+function focusKey(el) {
+  if (!el || el === document.body) return null;
+  if (el.id) return "#" + el.id;
+  if (el.dataset.key) return `[data-key="${el.dataset.key}"]`;
+  if (el.name && el.value) return `[name="${el.name}"][value="${el.value}"]`;
+  if (el.dataset.act) return `[data-act="${el.dataset.act}"]` + (el.dataset.slot ? `[data-slot="${el.dataset.slot}"]` : "");
+  return null;
+}
+
 function render() {
+  // Re-rendering replaces the DOM; put keyboard focus back where it was.
+  const key = focusKey(document.activeElement);
   $("#app").innerHTML = S.view === "signin" ? viewSignin() : S.view === "list" ? viewList() : viewRoom();
+  $("#proto").innerHTML = protoControls();
   renderPending();
+  const el = key && document.querySelector(key);
+  if (el && !el.disabled) el.focus();
 }
 
 document.addEventListener("click", (e) => {
   const b = e.target.closest("[data-act]");
-  if (!b || b.disabled) return;
+  if (!b || b.disabled || b.getAttribute("aria-disabled") === "true") return;
+  if (b.tagName === "A") e.preventDefault();
   const a = b.dataset.act;
   const r = S.room && room();
   if (a === "signin") { S.view = "list"; }
   else if (a === "signout") { S.view = "signin"; S.pending = null; }
-  else if (a === "open") { S.view = "room"; S.room = b.dataset.id; S.toast = null; S.pending = null; S.unlock = false; S.sceneResult = null; S.readNote = null; window.scrollTo(0, 0); }
-  else if (a === "back") { S.view = "list"; S.pending = null; S.unlock = false; }
+  else if (a === "open") { S.view = "room"; S.room = b.dataset.id; S.toast = null; S.pending = null; S.unlock = false; S.sceneAck = false; S.replaced = null; S.sceneResult = null; window.scrollTo(0, 0); }
+  else if (a === "back") { S.view = "list"; S.pending = null; S.unlock = false; S.sceneAck = false; S.replaced = null; }
   else if (a === "vol") { stageVol(parseFloat(b.dataset.to)); }
   else if (a === "target") {
-    const raw = $("#tgt").value.trim().replace(MINUS, "-");
+    const raw = $("#tgt").value.trim().replace(/^[\u2212\u2013]/, "-");
     const v = Number(raw);
     const err = raw === "" || isNaN(v) ? "Type a level in dB, such as " + MINUS + "30."
       : v > 0 ? "0 dB is the loudest setting; levels are below it, such as " + MINUS + "30."
       : stageVol(v);
-    if (err) { render(); $("#tgt").value = raw; $("#tgt-err").textContent = err; return; }
+    if (err) { render(); $("#tgt").value = raw; $("#tgt-err").textContent = err; say(err); return; }
   }
-  else if (a === "cancel") { S.pending = null; S.unlock = false; S.toast = null; }
+  else if (a === "cancel") { S.pending = null; S.unlock = false; S.sceneAck = false; S.replaced = null; S.toast = null; }
   else if (a === "send") { send(); return; }
   else if (a === "undo") {
     // Undo sends at once only when it lands at or below -10 dB. Going back up
-    // to a loud level is staged like any other loud change.
-    const err = stageVol(parseFloat(b.dataset.to));
-    if (err) S.toast = { kind: "warn", html: `Going back to ${esc(db(parseFloat(b.dataset.to)))} is louder than ${MINUS}10 dB. Tick “Allow above ${MINUS}10 dB” and set it again.` };
-    else if (S.pending) { S.toast = null; send(); return; }
+    // to a loud level is never one tap: it has to be set again, with the unlock.
+    const to = parseFloat(b.dataset.to);
+    if (to > SAFE_MAX) S.toast = { kind: "warn", html: `Going back to ${esc(db(to))} is louder than ${MINUS}10 dB, so undo won't do it in one tap. Tick “Allow above ${MINUS}10 dB” and set it again.` };
+    else { stageVol(to); if (S.pending) { S.toast = null; send(); return; } }
   }
-  else if (a === "undopreset") { stagePreset(b.dataset.to); S.toast = null; send(); return; }
+  else if (a === "undopreset") { stagePreset(b.dataset.to); S.toast = null; }
   else if (a === "scene") { stageScene(b.dataset.slot); }
   // The one write without a preview: it can only make the room quieter.
-  else if (a === "lower") { S.sceneResult = null; S.pending = { kind: "vol", from: r.vol.v, to: -30, noUndo: true, what: `Lower ${r.name} to ${db(-30)}`, frames: "" }; send(); return; }
+  else if (a === "lower") { S.sceneResult = null; S.unlock = false; stageVol(-30); if (S.pending) { S.pending.noUndo = true; send(); return; } }
   else if (a === "restorevol") { stageVol(S.sceneResult.before.vol); S.sceneResult = null; }
   else if (a === "dismiss") { S.sceneResult = null; }
   else if (a === "read") {
-    S.reading = true; render();
+    r.reading = true; render();
     setTimeout(() => {
-      S.reading = false;
+      r.reading = false;
       const x = r.onRead;
       const was = r.vol.v;
-      r.vol = { v: x.vol, src: "read", age: "just now" }; r.step = { v: x.step, src: "read" };
+      r.vol = { v: x.vol, src: "read", age: "just now", session: true }; r.step = { v: x.step, src: "read" };
       r.input = { v: x.input, src: "read", age: "just now" }; r.output = { v: x.output, hp: x.hp, src: "read", age: "just now" };
       r.mute = { v: x.mute, src: "read", age: "just now" };
-      if (was !== null && was !== x.vol) S.readNote = `This differs from the ${db(was)} toppingctl last wrote, so it was probably changed from the front panel, the remote or the vendor app.`;
+      if (was !== null && was !== x.vol) r.readNote = `This differs from the ${db(was)} toppingctl last wrote, so it was probably changed from the front panel, the remote or the vendor app.`;
       render(); say("Read " + r.name + ".");
     }, 900);
     return;
@@ -529,10 +568,10 @@ document.addEventListener("click", (e) => {
 
 document.addEventListener("change", (e) => {
   const t = e.target;
-  if (t.id === "unlock" || t.id === "unlock2") {
-    S.unlock = t.checked;
+  if (t.id === "unlock") {
+    S.unlock = t.checked; S.toast = null;
     if (!S.unlock && S.pending && S.pending.loud) S.pending = null;
-  } else if (t.id === "failnext") { S.failNext = t.checked; }
+  } else if (t.id === "unlock2") { S.sceneAck = t.checked; } else if (t.id === "failnext") { S.failNext = t.checked; }
   else if (t.name === "preset") { stagePreset(t.value); }
   else if (t.id === "slider") { stageVol(parseFloat(t.value)); }
   else return;
@@ -540,7 +579,7 @@ document.addEventListener("change", (e) => {
 });
 
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && S.pending && !S.sending) { S.pending = null; S.unlock = false; render(); }
+  if (e.key === "Escape" && S.pending && !S.sending) { S.pending = null; S.unlock = false; S.sceneAck = false; S.replaced = null; render(); }
   if (e.key === "Enter" && e.target.id === "tgt") $("[data-act=target]").click();
 });
 
