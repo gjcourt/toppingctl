@@ -114,7 +114,7 @@ These facts were checked in the sources above. Each one constrains the design.
 | The DX1 II speaks a different protocol (`"protocol": "dx1"`). A readNack is only a read for registers on the vendor's read-safe list; on any other register **it writes the data field**. `devstate.dx1_state` also reads the `0x1106` PEQ dump, whose read-safety PR #25 marks as an unverified contributor claim | `toppingctl.py` `DEVICES["dx1ii"]`; `devstate.py` `dx1_query`, `dx1_state`; PR #25 | Reading is per protocol. The agent's DX1 II reader leaves out `0x1106` until it is confirmed (see "What the agent reads") |
 | Only one client gets the device: "the vendor web app claims it over WebHID, and only one client gets it", so `read_settings` retries the open | `devstate.py:128–130` | The agent mustn't hold the handle permanently, or the vendor app and the CLI lose the DAC. It opens once **per operation**, so a read, write and read-back share one handle. Lab 01-022 §5 still calls the agent-plus-vendor-app case untested, and sleep and hot-plug "undesigned" |
 | `read_settings()` listens for a fixed 2 s window. The spec gives no single record count to stop at: §5 measured "61 reply frames", and the capabilities doc says "52 settings records exposed on firmware ≥ 2.40" | `devstate.py:126`; spec §5; `topping-dac-capabilities.md` | A fresh read costs about 2 s today. Stopping early needs a measured count first, so it comes **after** the step-2 measurement |
-| Scene recall (`71 11`/`71 12`, CallC1/CallC2) is **vendor-sourced and not in the spec's confirmed table**. A recall can change input, output and PEQ at once | spec §5; `scenes.py` docstring | Out of the web build (Q15). A later ticket confirms it on the front panel, then adds it |
+| Scene recall (`71 11`/`71 12`, CallC1/CallC2) is **vendor-sourced and not in the spec's confirmed table**. A recall can change volume, input, output and PEQ at once | spec §5; `scenes.py` docstring | Out of the web build (Q15). A later ticket confirms it on the front panel, then adds it |
 | The preamp (`0x9c`) **can't be read back**. GetSettings has no preamp field, so "current preamp" only ever means "last written by toppingctl" | `vendor_commands.py` `SETTINGS_FIELDS`; `toppingctl.py` `cmd_apply` | Decision 12's rule uses the last-written value. Unknown counts as loud (Q7) |
 | `cmd_*` functions end with `sys.exit()` and `print()` | `toppingctl.py` | The guards need extracting into functions that return frames or raise. The agent can't call the CLI functions as they are |
 | No list of confirmed registers exists in code. `DEVICES[...]["status"]` gates whole models, not registers | `toppingctl.py` | Step 1 creates the list from the spec's confirmed tables (see "The confirmed register set") |
@@ -262,12 +262,14 @@ write replayed minutes later acts on a state nobody has looked at.
 - **Version pinning (Q9):** nodes running `toppingd` are pinned to a release tag, bumped by a
   homelab PR. The installer needs three changes for that:
   1. It fetches `archive/refs/heads/${TOPPINGCTL_REF}.tar.gz`, which only resolves branches.
-     On a failed fetch it logs a warning and keeps the old sources. So the URL changes to one
-     that resolves tags (`archive/refs/tags/…`).
+     On a failed fetch it logs a warning and keeps the old sources. So the URL changes to
+     `archive/${TOPPINGCTL_REF}.tar.gz`, which resolves branches and tags alike. Nodes that
+     still track `main` keep working.
   2. It copies from `/tmp/toppingctl-${TOPPINGCTL_REF}/`. George's review notes that GitHub
      strips a leading `v` from the archive directory, so a tag like `v1.0` would break that
-     path. **(proposal)** Glob for the extracted directory (`/tmp/toppingctl-*/`) rather than
-     building its name. Tags then work with or without a `v`.
+     path. **(proposal)** Extract into a fresh `mktemp -d` directory and glob the single
+     top-level directory inside it, rather than building its name. Tags then work with or
+     without a `v`, and a directory left behind by an earlier run can't be picked up.
   3. It checks that `toppingd.py` arrived before restarting the unit.
 
 ### `toppingweb` in the cluster
@@ -353,7 +355,8 @@ CLI and the agent can't drift apart. Each one gets an offline test that calls th
 ### The confirmed register set
 
 Step 1 (ticket 1a) adds a `CONFIRMED_WRITES` table to `toppingctl.py`, built from the spec's
-confirmed tables and keyed by model. Today only the DX5 II has entries:
+confirmed tables and keyed by model. It covers **write** frames only (opcode `0x20`). Today only
+the DX5 II has entries:
 
 | Register | Meaning | Spec |
 | --- | --- | --- |
@@ -364,13 +367,32 @@ confirmed tables and keyed by model. Today only the DX5 II has entries:
 | `91`–`9b`, subs `01`–`0a` | PEQ bands. `9b` is inert but written so that a stale band 11 gets cleared | §3 "PEQ — confirmed"; §5 band 11 |
 | `9c`, subs `01`–`04` | Preamp | §3, CONFIRMED |
 
-Anything not in the table can't be sent. Scene recall (`71 11`/`71 12`), input (`71 04`) and
-output (`71 05`) are absent until their hardware-confirmation tickets add them, and mute was
-never driven. The table is a code constant, not config.
+**Where the table is enforced.** It is enforced in the **agent's** send path, and in
+`toppingctl.py`'s own commands on a confirmed model. It is **not** added to the shared
+`Device.send`, because other tools legitimately go beyond it:
+
+- `scenes.py` sends recall (`71 11`/`71 12`), which ticket 1d keeps behind a guard;
+- `setctl.py` and `probe.py` exist to write other registers, with read-back;
+- `--unverified` writes to the DX1 II and D90 III are how AGENTS.md's onboarding sequence
+  confirms a model.
+
+Those CLI paths keep their existing gates: model `status`, `--unverified` and `--force`.
+
+**Reads have their own allow-list,** `CONFIRMED_READS`, also per model:
+
+- DX5 II: `71 0c` (GetSettings);
+- DX1 II: the vendor read-safe list from `devstate.dx1_query`, minus `11 06`;
+- D90 III: nothing.
+
+The agent sends a readNack only if it is on that list.
+
+In the agent, anything not in the tables can't be sent. Scene recall (`71 11`/`71 12`), input
+(`71 04`) and output (`71 05`) are absent until their hardware-confirmation tickets add them,
+and mute was never driven. Both tables are code constants, not config.
 
 | Rule (AGENTS.md / decisions) | How the agent enforces it |
 | --- | --- |
-| **Only registers confirmed in the spec** | The API has **no raw-frame, register or probe endpoint**. It exposes named operations only. The send path refuses any frame whose `(reg, sub)` isn't in `CONFIRMED_WRITES` for the model. A test runs every operation on every model and checks this |
+| **Only registers confirmed in the spec** | The API has **no raw-frame, register or probe endpoint**. It exposes named operations only. The agent's send path refuses any write frame whose `(reg, sub)` isn't in `CONFIRMED_WRITES` for the model, and any readNack not in `CONFIRMED_READS`. A test runs every operation and every read on every model and checks both |
 | **Never implement scene save (`71 35`)** | No operation builds it. The send path also checks every frame against a deny-list: SaveC1/SaveC2 (`0x7135`/`0x7136`), FactoryReset (`0x710b`) and FirmwareUpdate (`0x712e`). That is the `NEVER` set in `listen.py`, resolved by name through `vendor_commands.py`. A test asserts that each one is refused even when built by hand |
 | **Only the DX5 II is confirmed; other models are read-only** | Capabilities come from `DEVICES[key]["status"]`. Anything not `"confirmed"` gets an empty write list. The agent has no `--unverified` and no config switch that grants it. A write to a D90 III returns `403 model_unverified` with the reason in plain words |
 | **Input, output and mute: read-only for now** (decision 1) | They are absent from the write list for **every** model, including the DX5 II, until a hardware-confirmation ticket marks each one confirmed in code |
@@ -437,11 +459,16 @@ George is the only user (decision 6), but there are still several writers.
 
 ### The device lock
 
-- **Who takes it.** A lock helper in `toppingctl.py` is taken by **every entry point that opens
-  the device**, because the device grants one handle. That means:
+- **Who takes it.** A lock helper in `toppingctl.py` is taken in the `main()` of **every entry
+  point that opens the device**, because the device grants one handle. That means:
   - `toppingctl.py`, `scenes.py`, `setctl.py`, `probe.py` and `smoke.py`;
-  - `meters.py`, `listen.py`, and `readsettings.py`/`devstate.py`;
-  - the agent.
+  - `meters.py`, `listen.py` and `readsettings.py`;
+  - the agent, around each operation.
+
+  Library code such as `devstate.py` and `Device` never takes it. The helper is also reentrant
+  within a process (a depth counter around one fd). That way `cmd_vol` calling
+  `devstate.read_settings`, or the agent calling the shared-handle read, can't block on its own
+  lock.
 - **Why per operation.** The lock is taken once per command or operation, not per open.
   `cmd_vol`, for example, reads `volumeStep` and closes before it opens the writer, and a
   per-open lock would let another process slip in between that read and the write.
@@ -451,7 +478,9 @@ George is the only user (decision 6), but there are still several writers.
   - otherwise `~/.toppingctl/device.lock`, on a CLI-only machine such as a Mac.
 
   It doesn't follow `TOPPINGCTL_STATE_DIR`, so a CLI run under `sudo` without the wrapper still
-  contends for the same lock. If the lock file can't be opened (for example, a user outside the
+  contends for the same lock. The installer pre-creates the file as `root:toppingd` mode `0664`,
+  and the helper opens it **read-only** for `flock` (which Linux allows). A root run under umask
+  022 then can't leave a lock file the agent is unable to use. If the lock file can't be opened (for example, a user outside the
   `toppingd` group), the CLI refuses to write and says why. Reads warn and continue.
 - **How long each side waits** **(proposal)**. The longest normal holders are:
   - `listen.py`, whose `--secs` defaults to 10 s and which holds the device for that long;
@@ -493,7 +522,7 @@ This follows AGENTS.md: `toppingctl.py` stays a single-file CLI and the source o
 builders and guards. New entry points sit beside it, as `scenes.py` and `setctl.py` already do.
 
 ```
-toppingctl.py            + plan_* functions that return frames or raise Refused, CONFIRMED_WRITES
+toppingctl.py            + plan_* functions, Refused, CONFIRMED_WRITES and CONFIRMED_READS
                          + TOPPINGCTL_STATE_DIR override, + device lock helper
 devstate.py              + read_settings on a passed-in handle; dx1_state without 0x1106 on request
 scenes.py                + −10 dB guard and --force
@@ -529,21 +558,24 @@ Each step ends in something George can check. Stopping after step 3 is a real op
 0. **Approve this plan.** Open the hardware-confirmation tickets for input, output and mute
    (decision 1). Merge PR #25 before ticket 1a starts.
 1. **Step 1 is four tickets.** Each is safe to merge on its own, and in this order:
-   - **1a. `plan_*` / `Refused` refactor and `CONFIRMED_WRITES`.** Pure functions such as
+   - **1a. `plan_*` / `Refused` refactor, `CONFIRMED_WRITES` and `CONFIRMED_READS`.** Pure functions such as
      `plan_volume(spec, db, step_db, allow_loud) -> list[Frame]` raise `Refused(reason)`
      instead of calling `sys.exit`. The `cmd_*` functions become thin wrappers that print and
      exit as they do now, so there is **one** −10 dB check, **one** unverified check and
-     **one** frame builder for the CLI and the agent. `CONFIRMED_WRITES` is created from the
-     spec's confirmed tables ("The confirmed register set"), and `Device.send` refuses anything
-     outside it.
+     **one** frame builder for the CLI and the agent. `CONFIRMED_WRITES` and `CONFIRMED_READS` are
+     created from the spec's confirmed tables ("The confirmed register set"). `toppingctl.py`'s
+     own commands check them on a confirmed model. `Device.send` doesn't, so `scenes.py`,
+     `setctl.py`, `probe.py` and `--unverified` keep working.
      - Tests: every `--dry-run` command in CI prints **byte-identical output** before and after.
      - A fake-device test answering `one_db`, because dry-run skips the live `volumeStep` read.
-     - A test that every CLI command's frames fall inside `CONFIRMED_WRITES`.
+     - A test that every `toppingctl.py` dry-run command for the DX5 II emits only frames in
+       `CONFIRMED_WRITES`.
      - One test per guard.
    - **1b. State dir and device lock across all entry points.** It covers the
      `TOPPINGCTL_STATE_DIR` override and the lock helper with its fixed path, taken by every
      entry point listed under "The device lock". The CLI waits 15 s and names the holder.
      - Tests: two processes contend for the lock.
+     - `cmd_vol` runs under the lock without blocking itself (reentrancy).
      - The CLI's message names the holder.
      - A run under `sudo` without the wrapper still finds the same lock.
    - **1c. Shared-handle settings read.** `read_settings` takes a passed-in handle as an
@@ -606,7 +638,8 @@ Each step ends in something George can check. Stopping after step 3 is a real op
 All of these run offline in CI and call the agent API, not the UI:
 
 - A write to an `unverified` or unknown model is refused for every operation.
-- No sequence of API calls emits a frame outside `CONFIRMED_WRITES`. That includes:
+- No sequence of API calls emits a write frame outside `CONFIRMED_WRITES`, or a readNack
+  outside `CONFIRMED_READS`. That includes:
   - SaveC1/SaveC2 (`71 35`, `71 36`), FactoryReset and FirmwareUpdate;
   - scene recall (`71 11`, `71 12`);
   - input (`71 04`) and output (`71 05`).
