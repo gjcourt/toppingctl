@@ -478,10 +478,12 @@ George is the only user (decision 6), but there are still several writers.
   - otherwise `~/.toppingctl/device.lock`, on a CLI-only machine such as a Mac.
 
   It doesn't follow `TOPPINGCTL_STATE_DIR`, so a CLI run under `sudo` without the wrapper still
-  contends for the same lock. The installer pre-creates the file as `root:toppingd` mode `0664`,
-  and the helper opens it **read-only** for `flock` (which Linux allows). A root run under umask
-  022 then can't leave a lock file the agent is unable to use. If the lock file can't be opened (for example, a user outside the
-  `toppingd` group), the CLI refuses to write and says why. Reads warn and continue.
+  contends for the same lock. The installer pre-creates the file as `root:toppingd` mode `0644`,
+  and the helper opens it **read-only** for `flock` (which Linux allows), so a root run under
+  umask 022 can't leave a lock file the agent is unable to use. On the `~/.toppingctl` fallback
+  the helper creates the file if it is missing. If the lock file can't be opened (for example,
+  `/var/lib/toppingctl` exists but the file was deleted and the caller can't recreate it), the
+  CLI refuses to write and says why. Reads warn and continue.
 - **How long each side waits** **(proposal)**. The longest normal holders are:
   - `listen.py`, whose `--secs` defaults to 10 s and which holds the device for that long;
   - a preset Send, at about 4–5 s.
@@ -528,7 +530,7 @@ devstate.py              + read_settings on a passed-in handle; dx1_state withou
 scenes.py                + −10 dB guard and --force
 toppingd.py              per-host agent: stdlib HTTP server, HMAC, policy, one HID worker
 toppingd.yaml.example    agent config (YAML)
-test_offline.py          + tests for plan_*, CONFIRMED_WRITES, the lock, the scenes.py guard
+test_offline.py          + tests for plan_*, CONFIRMED_WRITES/READS, the lock, scenes.py guard
 test_toppingd.py         agent API tests against a fake HID device, no hardware
 docs/plans/              this plan
 docs/ui/                 task analysis, prototype r1, prototype r2 (step 3)
@@ -562,14 +564,18 @@ Each step ends in something George can check. Stopping after step 3 is a real op
      `plan_volume(spec, db, step_db, allow_loud) -> list[Frame]` raise `Refused(reason)`
      instead of calling `sys.exit`. The `cmd_*` functions become thin wrappers that print and
      exit as they do now, so there is **one** −10 dB check, **one** unverified check and
-     **one** frame builder for the CLI and the agent. `CONFIRMED_WRITES` and `CONFIRMED_READS` are
-     created from the spec's confirmed tables ("The confirmed register set"). `toppingctl.py`'s
-     own commands check them on a confirmed model. `Device.send` doesn't, so `scenes.py`,
+     **one** frame builder for the CLI and the agent. `CONFIRMED_WRITES` comes from the spec's
+     confirmed tables. `CONFIRMED_READS` comes from GetSettings for the DX5 II and the vendor
+     read-safe list minus `11 06` for the DX1 II (see "The confirmed register set").
+     `toppingctl.py`'s own write commands check `CONFIRMED_WRITES` on a confirmed model.
+     `CONFIRMED_READS` is enforced by the agent only. `Device.send` doesn't, so `scenes.py`,
      `setctl.py`, `probe.py` and `--unverified` keep working.
      - Tests: every `--dry-run` command in CI prints **byte-identical output** before and after.
      - A fake-device test answering `one_db`, because dry-run skips the live `volumeStep` read.
      - A test that every `toppingctl.py` dry-run command for the DX5 II emits only frames in
        `CONFIRMED_WRITES`.
+     - A test that the DX1 II read-safe list in `devstate.dx1_query` minus `11 06` equals
+       `CONFIRMED_READS["dx1ii"]`, so the two can't drift apart.
      - One test per guard.
    - **1b. State dir and device lock across all entry points.** It covers the
      `TOPPINGCTL_STATE_DIR` override and the lock helper with its fixed path, taken by every
