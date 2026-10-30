@@ -828,7 +828,7 @@ class Device:
         time.sleep(0.004)  # the vendor app paces writes; don't flood the DSP
 
     def commit(self):
-        self.send(frame(REG_CTRL, SUB_COMMIT, 1), "commit")
+        self.send(*commit_frame())
 
     def close(self):
         if self.h:
@@ -1022,8 +1022,9 @@ def assert_writable(args):
 
 # --- plans ------------------------------------------------------------------
 #
-# Pure frame builders: no I/O, no printing, no exit. Each returns every frame
-# the operation sends, commit included, or raises Refused.
+# Pure frame builders: no printing, no exit, and no I/O of their own (plan_eq
+# calls the read_slot it is given). Each returns every frame the operation
+# sends, commit included, or raises Refused.
 
 
 def commit_frame():
@@ -1635,4 +1636,8 @@ def main():
 
 
 if __name__ == "__main__":
+    # Run as a script this module is __main__, and the lazy `import devstate`
+    # would load a second copy as `toppingctl` -- with its own Refused, which
+    # exits_on_refusal would not catch. Register this copy under its name.
+    sys.modules.setdefault("toppingctl", sys.modules[__name__])
     main()

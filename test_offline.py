@@ -297,6 +297,17 @@ class Dx1ReadSafeListTest(unittest.TestCase):
             toppingctl.CONFIRMED_READS["dx1ii"],
         )
 
+    def test_vendor_list_is_the_one_from_the_bundle(self):
+        # The 14 registers the vendor bundle's requestGroup builder allows, as
+        # the dx1_query docstring listed them before they became a constant.
+        listed = (
+            "0x7100 0x7900 0x7d00 0x810b 0x810c 0x810a 0x810d 0x810e 0x810f "
+            "0x8200 0x8300 0x8400 0x1204 0x1206"
+        )
+        expected = {(int(r, 16) >> 8, int(r, 16) & 0xFF) for r in listed.split()}
+        self.assertEqual(set(toppingctl.DX1_VENDOR_READ_SAFE), expected)
+        self.assertEqual(toppingctl.CONFIRMED_READS["dx1ii"], expected)
+
     def test_0x1106_is_read_but_not_confirmed(self):
         self.assertEqual(toppingctl.DX1_REG_PEQ_DUMP, (0x11, 0x06))
         self.assertIn((0x11, 0x06), toppingctl.DX1_READ_REGS)
@@ -508,6 +519,25 @@ class GuardTest(unittest.TestCase):
             with self.subTest(name=name), self.assertRaises(toppingctl.Refused):
                 toppingctl.plan_filter(self.DX1, name)
 
+    def test_empty_preset(self):
+        args = argparse.Namespace(device="dx5ii", dry_run=True, unverified=False, file=os.devnull)
+        with self.assertRaises(SystemExit) as cm:
+            run_quietly(toppingctl.cmd_apply, args)
+        self.assertIn("no usable filters found", str(cm.exception.code))
+
+    def test_unreadable_volume_step(self):
+        args = argparse.Namespace(
+            device="dx5ii", dry_run=False, unverified=False, db=-30.0, force=False, vol_step=None
+        )
+        boom = mock.Mock(side_effect=RuntimeError("no settings records"))
+        with (
+            mock.patch.object(devstate, "read_settings", boom),
+            mock.patch.object(toppingctl.hid, "Device", side_effect=AssertionError("opened")),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run_quietly(toppingctl.cmd_vol, args)
+        self.assertIn("cannot read volumeStep", str(cm.exception.code))
+
     def test_eq_slot(self):
         with self.assertRaisesRegex(toppingctl.Refused, "slot number 1-3"):
             toppingctl.plan_eq(self.DX1, "4")
@@ -564,6 +594,31 @@ class VolumeStepFromDeviceTest(unittest.TestCase):
         writes, out = self.run_vol(0)
         self.assertEqual(writes[1], toppingctl.frame(0x71, 0x02, 60))
         self.assertIn("volume -30.0 dB  (raw 60)", out)
+
+
+class Dx1EqOnLiveTest(unittest.TestCase):
+    """Live `eq on` reads the active slot (0x1206) through devstate, then
+    writes it to 0x110e -- the path --dry-run deliberately skips."""
+
+    def test_reads_the_slot_then_selects_it(self):
+        writes = []
+        reply = [bytes([0x22, 0x33, 0x10, 0x01, 0x01, 0x12, 0x06, 0, 0, 0, 2, 0, 0, 0x66, 0x77])]
+
+        class Handle(_make_fake_hid(writes)):
+            def read(self, *a, **kw):
+                return reply.pop() if reply else b""
+
+        args = argparse.Namespace(device="dx1ii", dry_run=False, state="on", unverified=True)
+        with (
+            mock.patch.object(toppingctl.hid, "Device", Handle),
+            mock.patch.object(toppingctl.hid, "enumerate", _fake_enumerate("DX1II")),
+        ):
+            out = run_quietly(toppingctl.cmd_eq, args)
+        query, select = writes
+        self.assertEqual((query[3], query[6], query[7]), (0x10, 0x12, 0x06))
+        self.assertEqual((select[6], select[7]), toppingctl.DX1_REG_SWITCH_CFG)
+        self.assertEqual(int.from_bytes(select[8:12], "big"), 2)
+        self.assertIn("eq on (slot 3)", out)
 
 
 GOLDEN = os.path.join(HERE, "fixtures", "dry_run_golden.json")
