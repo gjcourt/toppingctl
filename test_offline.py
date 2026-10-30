@@ -385,6 +385,12 @@ class ConfirmedWritesTableTest(unittest.TestCase):
             if spec["status"] != "confirmed":
                 self.assertEqual(toppingctl.CONFIRMED_WRITES[key], frozenset(), key)
 
+    def test_confirmed_models_have_writes(self):
+        # A confirmed model with an empty entry would refuse every write.
+        for key, spec in toppingctl.DEVICES.items():
+            if spec["status"] == "confirmed":
+                self.assertTrue(toppingctl.CONFIRMED_WRITES[key], key)
+
     def test_dx5ii_table_matches_the_plan(self):
         expected = {(0x71, 0x02), (0x71, 0x17), (0x71, 0x01), (0x71, 0x34)}
         expected |= {(r, s) for r in range(0x91, 0x9C) for s in range(0x01, 0x0B)}
