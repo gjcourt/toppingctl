@@ -91,7 +91,8 @@ def main():
         print("\nVolume will be set quiet and restored. Nothing is saved to C1/C2.")
 
     if args.dry_run:
-        return run(args)
+        run(args)
+        return
     with cli_device_lock(write=True):
         run(args)
 

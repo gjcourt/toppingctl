@@ -48,6 +48,7 @@ import os
 import re
 import socket
 import sys
+import threading
 import time
 from typing import NamedTuple
 
@@ -881,7 +882,8 @@ def save_state(st):
 # cmd_vol reads volumeStep and closes before it opens the writer, and another
 # process must not slip in between. Library code (devstate, Device) never
 # takes it. The lock is reentrant within a process: a depth counter around
-# one fd.
+# one fd, owned by the thread that took it. Another thread asking while it is
+# held is a bug (the planned agent has one HID worker), so that raises.
 
 
 class DeviceBusy(Exception):
@@ -893,7 +895,7 @@ class DeviceBusy(Exception):
         super().__init__(f"device lock held by {holder or 'an unknown process'}")
 
 
-_lock = {"fd": None, "depth": 0, "writable": False}
+_lock = {"fd": None, "depth": 0, "writable": False, "owner": None}
 
 
 def lock_path():
@@ -983,6 +985,8 @@ def acquire_device_lock(wait, prog=None):
     DeviceBusy. Reentrant: a process already holding it just goes deeper.
     OSError if the lock file can't be opened at all."""
     if _lock["depth"]:
+        if _lock["owner"] != threading.get_ident():
+            raise RuntimeError("the device lock is held by another thread of this process")
         _lock["depth"] += 1
         return
     fd, writable = _open_lock(lock_path())
@@ -1005,15 +1009,17 @@ def acquire_device_lock(wait, prog=None):
         with contextlib.suppress(OSError):
             os.ftruncate(fd, 0)
             os.pwrite(fd, record, 0)
-    _lock.update(fd=fd, depth=1, writable=writable)
+    _lock.update(fd=fd, depth=1, writable=writable, owner=threading.get_ident())
 
 
 def release_device_lock():
+    if not _lock["depth"]:
+        raise RuntimeError("release_device_lock without a matching acquire")
     _lock["depth"] -= 1
     if _lock["depth"]:
         return
     fd, writable = _lock["fd"], _lock["writable"]
-    _lock.update(fd=None, writable=False)
+    _lock.update(fd=None, writable=False, owner=None)
     if writable:
         with contextlib.suppress(OSError):
             os.ftruncate(fd, 0)
@@ -1042,14 +1048,17 @@ def cli_device_lock(write=True):
     refuses and says why; a read warns and runs without it."""
     try:
         acquire_device_lock(CLI_LOCK_WAIT)
+        held = True
     except DeviceBusy as e:
         sys.exit(busy_message(e.holder))
     except OSError as e:
         path = lock_path()
         if write:
-            sys.exit(f"cannot open the device lock {path}: {e.strerror}. Refusing to write.")
-        print(f"warning: cannot open the device lock {path}: {e.strerror}.", file=sys.stderr)
+            sys.exit(f"cannot use the device lock {path}: {e.strerror}. Refusing to write.")
+        print(f"warning: cannot use the device lock {path}: {e.strerror}.", file=sys.stderr)
         print("  reading without it; another client may interleave.", file=sys.stderr)
+        held = False
+    if not held:
         yield
         return
     try:

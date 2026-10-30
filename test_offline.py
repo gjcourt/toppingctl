@@ -33,9 +33,8 @@ import toppingctl  # noqa: E402
 
 
 def load_dx1_show():
-    """readsettings.py parses its arguments when imported as a module of the
-    same name it was written as a script, so exec only its imports and
-    function/class defs to get at dx1_show() without hardware."""
+    """Exec only readsettings.py's imports and function/class defs, to get at
+    dx1_show() without hardware or the `if __name__` entry point."""
     with open(os.path.join(HERE, "readsettings.py")) as fh:
         tree = ast.parse(fh.read())
     keep = [
@@ -659,7 +658,6 @@ class DeviceLockTest(unittest.TestCase):
         with open(self.holder_script, "w") as fh:
             fh.write(LOCK_HOLDER.format(here=HERE))
         env = {"HOME": os.path.join(self.tmp, "home")}
-        env.pop("TOPPINGCTL_STATE_DIR", None)
         for p in (
             mock.patch.object(toppingctl, "LOCK_SYSTEM_DIR", self.sysdir),
             mock.patch.dict(os.environ, env),
@@ -722,6 +720,25 @@ class DeviceLockTest(unittest.TestCase):
             self.assertEqual(toppingctl._lock["depth"], 1)
             self.assertIn("DeviceBusy", self.contend().stderr)
         self.assertIsNone(toppingctl._lock["fd"])
+
+    def test_another_thread_cannot_reenter(self):
+        errors = []
+
+        def other():
+            try:
+                toppingctl.acquire_device_lock(0)
+            except RuntimeError as e:
+                errors.append(e)
+
+        with toppingctl.device_lock(0):
+            t = threading.Thread(target=other)
+            t.start()
+            t.join()
+        self.assertEqual(len(errors), 1)
+
+    def test_unbalanced_release_raises(self):
+        with self.assertRaises(RuntimeError):
+            toppingctl.release_device_lock()
 
     def run_main(self, argv):
         out = io.StringIO()
@@ -828,6 +845,7 @@ class DeviceLockTest(unittest.TestCase):
             self.assertTrue(os.path.exists(toppingctl.lock_path()))
 
     @unittest.skipIf(os.geteuid() == 0, "root ignores file permissions")
+    @unittest.skipUnless(os.path.exists("/proc/locks"), "a read-only holder is named via /proc")
     def test_read_only_lock_file_still_locks(self):
         """The installer's file is root:toppingd 0644, so the agent opens it
         read-only; flock works on that, and nothing is recorded."""
