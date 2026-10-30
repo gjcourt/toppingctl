@@ -34,6 +34,7 @@ from toppingctl import (
     SUB_VOLUME,
     Device,
     band_frames,
+    cli_device_lock,
     frame,
     load_state,
     save_state,
@@ -89,6 +90,14 @@ def main():
     if not args.dry_run:
         print("\nVolume will be set quiet and restored. Nothing is saved to C1/C2.")
 
+    if args.dry_run:
+        run(args)
+        return
+    with cli_device_lock(write=True):
+        run(args)
+
+
+def run(args):
     dev = Device(args.dry_run)
     pause = 0 if args.dry_run else args.pause
 

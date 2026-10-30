@@ -21,7 +21,7 @@ import argparse
 import sys
 
 import devstate
-from toppingctl import Device, frame
+from toppingctl import Device, cli_device_lock, frame
 from vendor_commands import COMMANDS
 
 RECALL = {"c1": 0x7111, "c2": 0x7112}
@@ -38,7 +38,14 @@ def main():
 
     cmd = RECALL[a.slot]
     print(f"  {COMMANDS.get(cmd, '?')} (0x{cmd:04x})")
+    if a.dry_run:
+        return recall(a, cmd)
+    # One lock across the before read, the recall and the after read.
+    with cli_device_lock(write=True):
+        return recall(a, cmd)
 
+
+def recall(a, cmd):
     before = {} if a.dry_run else devstate.by_name()
     dev = Device(a.dry_run, None)
     dev.send(frame(cmd >> 8, cmd & 0xFF, 1), f"recall {a.slot}")
