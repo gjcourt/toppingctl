@@ -34,7 +34,9 @@ writing unknown registers to their DAC.
 
 Sequence: `devices` for the PID → entry with `"status": "unverified"` →
 `--dry-run` → a `vol` change watched on the front panel → `smoke.py` → only then
-`"confirmed"`.
+`"confirmed"`. Confirming a model also means adding its spec-confirmed write registers to
+`CONFIRMED_WRITES` in `toppingctl.py`: on a confirmed model, every write command
+refuses a frame that isn't listed there.
 
 ## Conventions
 

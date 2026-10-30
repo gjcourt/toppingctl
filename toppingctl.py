@@ -40,11 +40,13 @@ applied correctly regardless of cache accuracy.
 """
 
 import argparse
+import functools
 import json
 import os
 import re
 import sys
 import time
+from typing import NamedTuple
 
 try:
     import hid
@@ -189,10 +191,9 @@ DEVICES = {
         # comments below for the full map.
         #
         # ⚠️ READS ARE WRITE-ONLY-ADJACENT HERE. A readNack is only a read for
-        # the registers the vendor's own query builder allows (0x7100, 0x7900,
-        # 0x7d00, 0x810b, 0x810c, 0x810a, 0x810d, 0x810e, 0x810f, 0x8200,
-        # 0x8300, 0x8400, 0x1204, 0x1206). 0x1106, the 3-slot PEQ dump, is
-        # also queried (see devstate.dx1_query) but is NOT on that vendor
+        # the registers the vendor's own query builder allows:
+        # DX1_VENDOR_READ_SAFE. 0x1106, the 3-slot PEQ dump, is also queried
+        # (DX1_REG_PEQ_DUMP, see devstate.dx1_query) but is NOT on that vendor
         # list -- it rests on one contributor's unmeasured claim, not a
         # recorded hardware test. See devstate.dx1_query's docstring before
         # trusting it. For anything else -- gain, filter,
@@ -223,6 +224,47 @@ DEVICES = {
 }
 
 THESYCON_VID = 0x152A
+
+
+class Refused(Exception):
+    """A guard said no. The reason is the message the CLI prints on exit.
+
+    The plan_* functions raise this instead of calling sys.exit(), so the CLI
+    and a long-running caller (the planned toppingd agent) share one copy of
+    every check: the cmd_* wrappers turn it back into sys.exit(reason), and
+    the agent can turn it into an API error.
+    """
+
+
+def exits_on_refusal(cmd):
+    """Make a cmd_* wrapper exit with the refusal's reason, exactly as the
+    sys.exit() calls it replaced did."""
+
+    @functools.wraps(cmd)
+    def wrapper(args):
+        try:
+            return cmd(args)
+        except Refused as e:
+            sys.exit(str(e))
+
+    return wrapper
+
+
+class Frame(NamedTuple):
+    """One planned frame: the bytes frame() built, and the --dry-run label."""
+
+    data: bytes
+    label: str = ""
+
+    @property
+    def opcode(self):
+        return self.data[2]
+
+    @property
+    def reg_sub(self):
+        """(reg, sub) -- for a dx1 block frame that is the block, (0x81, 0x0A)."""
+        return (self.data[5], self.data[6])
+
 
 # --- protocol constants (see spec) ------------------------------------------
 
@@ -261,7 +303,7 @@ BAND_COUNT = 10
 
 
 def band_count(spec):
-    """Bands for a model, or exit if that number was never established.
+    """Bands for a model, or refuse if that number was never established.
 
     Per-device "bands" used to be dead data -- declared in DEVICES and never
     read, with this module-level constant used everywhere instead. That is
@@ -270,7 +312,7 @@ def band_count(spec):
     """
     n = spec.get("bands", BAND_COUNT)
     if n is None:
-        sys.exit(
+        raise Refused(
             f"{spec['name']}: PEQ band count is not established for this model.\n"
             "It is not read from a datasheet -- the DX5 II's 10 was found by "
             "writing a filter to each band and listening, which also caught an "
@@ -308,6 +350,34 @@ DX1_REG_INPUT = (0x7B, 0x00)  # input, 0 = usb, 1 = optical
 DX1_REG_SWITCH_CFG = (0x11, 0x0E)  # select PEQ slot 0..2; 0xffffffff = EQ off
 DX1_REG_QUERY_CFG = (0x12, 0x06)  # read back active PEQ slot (0..2)
 DX1_REG_QUERY_ENABLE = (0x12, 0x04)  # read back EQ enable bits (bit1 = on)
+
+# The registers a readNack may be sent to on this model, as (reg, sub). The
+# vendor bundle's requestGroup builder allows exactly these; for any other
+# register the device treats the readNack as a WRITE of its data field (see
+# devstate.dx1_query). devstate reads 0x810a as a block (dx1_read_block) and
+# the rest one at a time. 0x810d is allowed but nothing here reads it.
+DX1_VENDOR_READ_SAFE = (
+    (0x71, 0x00),
+    (0x79, 0x00),
+    (0x7D, 0x00),
+    (0x81, 0x0B),
+    (0x81, 0x0C),
+    (0x81, 0x0A),
+    (0x81, 0x0D),
+    (0x81, 0x0E),
+    (0x81, 0x0F),
+    (0x82, 0x00),
+    (0x83, 0x00),
+    (0x84, 0x00),
+    (0x12, 0x04),
+    (0x12, 0x06),
+)
+# The 3-slot PEQ dump. devstate.dx1_read_configs reads it, but it is NOT on the
+# vendor list: it rests on one contributor's unmeasured claim (PR #25), so it
+# is left out of CONFIRMED_READS until a recorded hardware read backs it.
+DX1_REG_PEQ_DUMP = (0x11, 0x06)
+# Every register devstate sends a readNack to on the DX1 II.
+DX1_READ_REGS = DX1_VENDOR_READ_SAFE + (DX1_REG_PEQ_DUMP,)
 
 # Volume raw is (dB + 99) * 10, 0..990. Below -10 dB the scale is 1 dB/step
 # (multiples of 10); above -10 it is 0.5 dB (multiples of 5). Decoded from the
@@ -376,6 +446,48 @@ DEFAULT_BAND = {"type": "PK", "freq": 632, "gain": 0.0, "q": 0.707, "on": False}
 # that byte is inside the CRC -- which is why the replayed frames worked and a
 # naive rebuild would not have.
 SUB_POWER_B4 = 0x00
+
+GET_SETTINGS = (REG_CTRL, 0x0C)  # readNack: the whole configuration (spec §5)
+
+# --- the confirmed register set ----------------------------------------------
+#
+# Write frames (opcode 0x20) the spec's confirmed tables establish, as
+# (reg, sub), per model. toppingctl's own write commands refuse anything else
+# on a confirmed model (check_confirmed_writes); the planned agent will refuse
+# it on every model. Device.send does NOT check it: scenes.py, setctl.py,
+# probe.py and --unverified writes legitimately go beyond it.
+#
+# Deliberately absent for every model: input (71 04), output (71 05), mute
+# (71 03, never driven), scene recall (71 11 / 71 12, vendor-sourced), and the
+# NEVER set -- SaveC1/SaveC2 (71 35 / 71 36), FactoryReset (71 0b) and
+# FirmwareUpdate (71 2e). Input, output, mute and recall each wait for a
+# hardware-confirmation ticket (TOPPINGCTL-2 decision 1, Q15). Unverified
+# models get nothing.
+CONFIRMED_WRITES = {
+    "dx5ii": frozenset(
+        [
+            (REG_CTRL, SUB_VOLUME),  # §4a, Confirmed
+            (REG_CTRL, SUB_GAIN),  # §4a, Confirmed
+            (REG_CTRL, SUB_POWER),  # §4a, Confirmed
+            (REG_CTRL, SUB_COMMIT),  # §4a, Confirmed (Heartbeat)
+        ]
+        # PEQ bands, §3 "PEQ -- confirmed". 0x9b is inert but written so a
+        # stale band 11 is cleared (§5).
+        + [(reg, sub) for reg in range(PEQ_FIRST, PEQ_LAST + 1) for sub in range(0x01, 0x0B)]
+        # Preamp, §3 CONFIRMED.
+        + [(REG_PREAMP, sub) for sub in range(0x01, 0x05)]
+    ),
+    "d90iii": frozenset(),
+    "dx1ii": frozenset(),
+}
+
+# readNacks established as reads, per model. Enforced by the planned agent
+# only -- not by Device.send or devstate, for the same reason as above.
+CONFIRMED_READS = {
+    "dx5ii": frozenset([GET_SETTINGS]),
+    "d90iii": frozenset(),
+    "dx1ii": frozenset(DX1_READ_REGS) - {DX1_REG_PEQ_DUMP},
+}
 
 STATE_DIR = os.path.expanduser("~/.toppingctl")
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
@@ -672,23 +784,15 @@ class Device:
         send() alone surfaced a confusing "device returned no settings records"
         instead of the actual reason. Measured on a D90 III, 2026-08-28.
         """
-        if self.dry_run or self.allow_unverified:
+        if self.dry_run:
             return
-        if self.spec.get("status") != "confirmed":
-            self._refuse_unverified()
+        self._refuse_unverified()
 
     def _refuse_unverified(self):
-        sys.exit(
-            f"refusing to write to {self.spec['name']}: its register map is "
-            f"{self.spec.get('status', 'unknown')}, not confirmed.\n"
-            "Six Topping models share USB 0x152a/0x8750 and their registers "
-            "collide -- 0x7113 is HomePage on one and BluetoothMode on "
-            "another -- so an unconfirmed map can write a real value to the "
-            "wrong setting and report success.\n"
-            "Read and --dry-run work without this flag; that is how you "
-            "verify. When a write moves the FRONT PANEL as expected, mark the "
-            "entry confirmed. To proceed anyway: --unverified"
-        )
+        try:
+            check_writable(self.spec, self.allow_unverified)
+        except Refused as e:
+            sys.exit(str(e))
 
     def _wire(self, f):
         """Put the frame on the wire the way THIS model expects it.
@@ -715,11 +819,7 @@ class Device:
     def send(self, f, label=""):
         # Second line of defence: a command that forgets require_writable()
         # still cannot reach hardware.
-        if (
-            not self.dry_run
-            and self.spec.get("status") != "confirmed"
-            and not self.allow_unverified
-        ):
+        if not self.dry_run:
             self._refuse_unverified()
         if self.dry_run:
             print(f"  {f.hex(' ')}  {label}")
@@ -728,7 +828,7 @@ class Device:
         time.sleep(0.004)  # the vendor app paces writes; don't flood the DSP
 
     def commit(self):
-        self.send(frame(REG_CTRL, SUB_COMMIT, 1), "commit")
+        self.send(*commit_frame())
 
     def close(self):
         if self.h:
@@ -846,7 +946,59 @@ def validate(bands, max_bands=BAND_COUNT, spec=None):
     return errs
 
 
-# --- commands ---------------------------------------------------------------
+# --- guards -----------------------------------------------------------------
+#
+# Each check exists once, raises Refused, and is shared by the plan_* builders
+# below, the cmd_* wrappers, and Device.
+
+
+def check_writable(spec, allow_unverified=False):
+    """Refuse a write to a model whose register map is not confirmed."""
+    if allow_unverified or spec.get("status") == "confirmed":
+        return
+    raise Refused(
+        f"refusing to write to {spec['name']}: its register map is "
+        f"{spec.get('status', 'unknown')}, not confirmed.\n"
+        "Six Topping models share USB 0x152a/0x8750 and their registers "
+        "collide -- 0x7113 is HomePage on one and BluetoothMode on "
+        "another -- so an unconfirmed map can write a real value to the "
+        "wrong setting and report success.\n"
+        "Reads and --dry-run work without this flag; that is how you "
+        "verify. When a write moves the FRONT PANEL as expected, mark the "
+        "entry confirmed. To proceed anyway: --unverified"
+    )
+
+
+def check_confirmed_writes(key, frames):
+    """On a confirmed model, refuse any frame that is not a write to a
+    register in CONFIRMED_WRITES. Unverified models are gated by
+    check_writable (and --unverified) instead, which is how a model gets
+    confirmed in the first place."""
+    spec = DEVICES[key]
+    if spec.get("status") != "confirmed":
+        return
+    allowed = CONFIRMED_WRITES.get(key, frozenset())
+    for f in frames:
+        if f.opcode != 0x20 or f.reg_sub not in allowed:
+            reg, sub = f.reg_sub
+            raise Refused(
+                f"refusing to send {f.data.hex(' ')} ({f.label}) to {spec['name']}: "
+                f"opcode {f.opcode:02x} register {reg:02x} {sub:02x} is not in "
+                "CONFIRMED_WRITES. Only writes the spec confirms are sent."
+            )
+
+
+def check_volume_range(db):
+    if not VOL_MIN_DB <= db <= VOL_MAX_DB:
+        raise Refused(f"volume {db} dB out of range ({VOL_MIN_DB}..{VOL_MAX_DB})")
+
+
+def check_loud(db, actual, allow_loud, shown):
+    """The -10 dB rule. Checks the level asked for AND the level it quantises
+    to on the device, so rounding can never carry an accepted level above
+    -10 dB. `shown` is the figure the refusal names."""
+    if (db > VOL_WARN_DB or actual > VOL_WARN_DB) and not allow_loud:
+        raise Refused(f"{shown:+.1f} dB is loud — re-run with --force if you mean it")
 
 
 def assert_writable(args):
@@ -858,42 +1010,245 @@ def assert_writable(args):
     "device returned no settings records" instead of the real reason.
     Measured against a D90 III, 2026-08-28.
     """
-    if getattr(args, "dry_run", False) or getattr(args, "unverified", False):
+    if getattr(args, "dry_run", False):
         return
     spec = DEVICES.get(getattr(args, "device", None) or "dx5ii")
-    if spec and spec.get("status") != "confirmed":
-        sys.exit(
-            f"refusing to write to {spec['name']}: its register map is "
-            f"{spec.get('status', 'unknown')}, not confirmed.\n"
-            "Six Topping models share USB 0x152a/0x8750 and their registers "
-            "collide -- 0x7113 is HomePage on one and BluetoothMode on "
-            "another -- so an unconfirmed map can write a real value to the "
-            "wrong setting and report success.\n"
-            "Reads and --dry-run work without this flag; that is how you "
-            "verify. When a write moves the FRONT PANEL as expected, mark the "
-            "entry confirmed. To proceed anyway: --unverified"
-        )
+    if spec:
+        try:
+            check_writable(spec, getattr(args, "unverified", False))
+        except Refused as e:
+            sys.exit(str(e))
 
 
-def cmd_apply(args):
-    assert_writable(args)
-    spec = DEVICES[getattr(args, "device", None) or "dx5ii"]
-    dx1 = spec.get("protocol") == "dx1"
-    bands, preamp, skipped = load_preset(args.file)
-    if not bands:
-        sys.exit(f"no usable filters found in {args.file}")
+# --- plans ------------------------------------------------------------------
+#
+# Pure frame builders: no printing, no exit, and no I/O of their own (plan_eq
+# calls the read_slot it is given). Each returns every frame the operation
+# sends, commit included, or raises Refused.
+
+
+def commit_frame():
+    return Frame(frame(REG_CTRL, SUB_COMMIT, 1), "commit")
+
+
+def pad_bands(bands):
+    """Pad to REG_COUNT, not BAND_COUNT: band 11 is inert on the DX5 II but
+    still gets an explicit disable so nothing stale survives underneath the
+    preset. On the DX1 II all 11 registers are real storage (verified in the
+    config dump), so the pad is equally meaningful there."""
+    return bands + [dict(DEFAULT_BAND) for _ in range(REG_COUNT - len(bands))]
+
+
+def plan_preset(spec, bands, preamp_db=None):
     # Resolve the band count for THIS device before validating against it.
-    # Exits if the model's band count was never established, rather than
+    # Refuses if the model's band count was never established, rather than
     # silently validating against the DX5 II's 10.
     errs = validate(bands, band_count(spec), spec)
     if errs:
-        sys.exit("preset rejected:\n  " + "\n  ".join(errs))
+        raise Refused("preset rejected:\n  " + "\n  ".join(errs))
+    frames = []
+    if preamp_db is not None:
+        frames += [Frame(f, f"preamp {preamp_db:+.1f}") for f in preamp_frames(preamp_db)]
+    for i, b in enumerate(pad_bands(bands)):
+        frames += [Frame(f, f"band{i + 1} {b['type']}") for f in band_frames(i, b)]
+    # Measured on hardware: DX1 II band/preamp writes land immediately in the
+    # active slot -- no heartbeat/commit frame participates. Sending the DX5 II
+    # commit (0x7134) there is harmless but proves nothing.
+    if spec.get("protocol") != "dx1":
+        frames.append(commit_frame())
+    return frames
 
-    # Pad to REG_COUNT, not BAND_COUNT: band 11 is inert on the DX5 II but
-    # still gets an explicit disable so nothing stale survives underneath the
-    # preset. On the DX1 II all 11 registers are real storage (verified in the
-    # config dump), so the pad is equally meaningful there.
-    padded = bands + [dict(DEFAULT_BAND) for _ in range(REG_COUNT - len(bands))]
+
+def plan_flat(spec):
+    band_count(spec)
+    frames = []
+    for i in range(REG_COUNT):
+        frames += [Frame(f, f"band{i + 1} default") for f in band_frames(i, DEFAULT_BAND)]
+    if spec.get("protocol") != "dx1":
+        frames.append(commit_frame())
+    return frames
+
+
+def check_preamp_range(db):
+    if not -40.0 <= db <= 10.0:
+        raise Refused(f"preamp {db} dB out of range (-40..+10)")
+
+
+def plan_preamp(spec, db):
+    check_preamp_range(db)
+    frames = [Frame(f, f"preamp {db:+.1f} dB") for f in preamp_frames(db)]
+    if spec.get("protocol") != "dx1":
+        frames.append(commit_frame())
+    return frames
+
+
+def volume_steps(db, step_db):
+    """(raw steps, the dB they land on) for the DX5 II's 0x7102."""
+    steps = int(round(-db / step_db))
+    return steps, -steps * step_db
+
+
+DX1_VOL_TARGETS = {"all": DX1_F_LOHP_VOL, "hp": DX1_F_HP_VOL, "lo": DX1_F_LO_VOL}
+
+
+def plan_volume(spec, db, step_db, allow_loud, target="all"):
+    """Volume frames for an absolute level. step_db is the DX5 II's raw unit
+    (0.5 or 1.0, from volumeStep); the DX1 II ignores it.
+
+    DX1 II: volume lives in the 0x810a output-state block, not at 0x7102:
+    writing the DX5 II register is silently ignored by this firmware
+    (measured 2026-08-08 -- the front panel never moved). The block's frame 5
+    is loHpVolume, the knob's "all outputs" target; frames 3/4 address the
+    hp/lo memories individually (`target`). The device pushes the written
+    frame back, which this tool does not yet verify -- the read side lives in
+    readsettings.py. Front-panel-confirmed on hardware."""
+    check_volume_range(db)
+    if spec.get("protocol") == "dx1":
+        raw = dx1_db_to_raw(db)
+        check_loud(db, dx1_raw_to_db(raw), allow_loud, shown=db)
+        cur = DX1_VOL_TARGETS[target]
+        return [
+            Frame(
+                dx1_block_frame(cur, raw), f"dx1 volume {db:+.1f} dB (block frame {cur}, raw {raw})"
+            )
+        ]
+    steps, actual = volume_steps(db, step_db)
+    check_loud(db, actual, allow_loud, shown=actual)
+    return [
+        Frame(frame(REG_CTRL, SUB_VOLUME, steps), f"volume {actual:+.1f} dB ({step_db} dB/step)"),
+        commit_frame(),
+    ]
+
+
+def plan_mute(spec, state):
+    if spec.get("protocol") != "dx1":
+        # 0x7103 exists in the vendor table but was never driven on DX5 II
+        # hardware, and a mute that silently fails is worse than no mute.
+        raise Refused(
+            "mute: not implemented for the DX5 II -- register 0x7103 is "
+            "vendor-sourced but hardware-unverified; use the vendor app "
+            "or the remote. The DX1 II mute needs --device dx1ii --unverified."
+        )
+    raw = DX1_MUTE[state]
+    return [
+        Frame(
+            dx1_block_frame(DX1_F_MUTE, raw),
+            f"dx1 mute {state} (block frame {DX1_F_MUTE}, raw {raw})",
+        )
+    ]
+
+
+def plan_input(spec, source):
+    if spec.get("protocol") != "dx1":
+        raise Refused(
+            "input: not implemented for the DX5 II (0x7104 unverified on "
+            "hardware); setctl.py exposes the fields that read back there."
+        )
+    raw = 0 if source == "usb" else 1
+    return [Frame(frame(*DX1_REG_INPUT, raw), f"dx1 input {source}")]
+
+
+def parse_filter(name):
+    """f1..f8 -> 0..7."""
+    raw = name.lower()
+    if raw.startswith("f") and raw[1:].isdigit():
+        raw = int(raw[1:]) - 1
+    else:
+        raise Refused("filter takes f1..f8 (or 0..7)")
+    if not 0 <= raw <= 7:
+        raise Refused("filter takes f1..f8 (or 0..7)")
+    return raw
+
+
+def plan_filter(spec, name):
+    if spec.get("protocol") != "dx1":
+        raise Refused(
+            "filter: for the DX5 II use setctl.py pcmFilter (read-back "
+            "verified there); this command implements the DX1 II register."
+        )
+    raw = parse_filter(name)
+    return [Frame(frame(*DX1_REG_FILTER, raw), f"dx1 pcm filter f{raw + 1}")]
+
+
+def plan_eq(spec, state, read_slot=None):
+    """EQ on/off and slot select for the DX1 II. switchMcuConfig (0x110e)
+    selects which of the 3 stored PEQ slots is active, with 0xffffffff = EQ
+    off. Writing 0x1204/0x1206 directly does NOT work -- they are report-only
+    (measured: 0x1204 write left the state at 7).
+
+    "on" re-enables the last active slot, which read_slot() returns (the live
+    path reads 0x1206). With read_slot=None -- --dry-run, which must not open
+    the device -- the frame uses slot 1 and says so."""
+    if spec.get("protocol") != "dx1":
+        raise Refused("eq: only implemented for the DX1 II's 3-slot PEQ.")
+    if state == "off":
+        value, label = 0xFFFFFFFF, "eq off"
+    elif state == "on":
+        if read_slot is None:
+            value, label = 0, "eq on (dry-run assumes slot 1; live run reads 0x1206)"
+        else:
+            val = read_slot()
+            if val is None or val > 2:
+                val = 0
+            value, label = val, f"eq on (slot {val + 1})"
+    else:
+        slot = int(state)
+        if not 1 <= slot <= 3:
+            raise Refused("eq takes on, off, or a slot number 1-3")
+        value, label = slot - 1, f"eq slot {slot}"
+    return [Frame(frame(*DX1_REG_SWITCH_CFG, value), label)]
+
+
+def plan_gain(spec, on):
+    label = f"gain {'on' if on else 'off'}"
+    if spec.get("protocol") == "dx1":
+        return [Frame(frame(*DX1_REG_HIGH_GAIN, 1 if on else 0), label)]
+    return [Frame(frame(REG_CTRL, SUB_GAIN, 1 if on else 0), label), commit_frame()]
+
+
+def plan_power(spec, on):
+    label = f"power {'on' if on else 'off'}"
+    if spec.get("protocol") == "dx1":
+        # Standby/wake is dx1State: 2 = standby, 1 = working. No checksum, no
+        # commit; the device pushes its state back. Verified asleep and awake
+        # on hardware.
+        return [Frame(frame(*DX1_REG_STATE, 1 if on else 2), label)]
+    return [Frame(frame(REG_CTRL, SUB_POWER, int(on), b4=SUB_POWER_B4, crc=True), label)]
+
+
+# --- commands ---------------------------------------------------------------
+#
+# Thin wrappers: build the plan, print, send, record. A Refused from any guard
+# exits with its reason (exits_on_refusal).
+
+
+def _key(args):
+    return getattr(args, "device", None) or "dx5ii"
+
+
+def send_plan(args, frames):
+    """Send planned frames through a Device, after the confirmed-register
+    check. Under --dry-run, Device.send prints them instead."""
+    check_confirmed_writes(_key(args), frames)
+    dev = Device(
+        args.dry_run,
+        getattr(args, "device", None),
+        allow_unverified=getattr(args, "unverified", False),
+    )
+    for f in frames:
+        dev.send(f.data, f.label)
+    dev.close()
+
+
+@exits_on_refusal
+def cmd_apply(args):
+    assert_writable(args)
+    spec = DEVICES[_key(args)]
+    dx1 = spec.get("protocol") == "dx1"
+    bands, preamp, skipped = load_preset(args.file)
+    if not bands:
+        raise Refused(f"no usable filters found in {args.file}")
+    frames = plan_preset(spec, bands, preamp)
 
     print(f"applying {len(bands)} filter(s) from {os.path.basename(args.file)}")
     for i, b in enumerate(bands, 1):
@@ -905,7 +1260,7 @@ def cmd_apply(args):
     # The 11th register is cleared on the wire so a stale band cannot linger,
     # but it is not a band the user can dump and re-apply. The cache keeps
     # only the usable count; validate() rejects anything longer.
-    stored = padded[: band_count(spec)]
+    stored = pad_bands(bands)[: band_count(spec)]
     unused = len(stored) - len(bands)
     if unused:
         print(f"  {unused} unused band(s) disabled")
@@ -933,25 +1288,7 @@ def cmd_apply(args):
             print("  last -- which this tool cannot read back. Positive gain with no preamp")
             print(f"  can clip. Set one first:  ./toppingctl.py preamp {-abs(boost):.1f}")
 
-    dev = Device(
-        args.dry_run,
-        getattr(args, "device", None),
-        allow_unverified=getattr(args, "unverified", False),
-    )
-    if preamp is not None:
-        for f in preamp_frames(preamp):
-            dev.send(f, f"preamp {preamp:+.1f}")
-    for i, b in enumerate(padded):
-        for f in band_frames(i, b):
-            dev.send(f, f"band{i + 1} {b['type']}")
-    if dx1:
-        # Measured on hardware: DX1 II band/preamp writes land immediately in
-        # the active slot -- no heartbeat/commit frame participates. Sending
-        # the DX5 II commit (0x7134) is harmless but proves nothing here.
-        pass
-    else:
-        dev.commit()
-    dev.close()
+    send_plan(args, frames)
 
     if not args.dry_run:
         st = load_state()
@@ -968,24 +1305,15 @@ def cmd_apply(args):
         print("\ndry run — nothing sent.")
 
 
+@exits_on_refusal
 def cmd_flat(args):
     assert_writable(args)
-    spec = DEVICES[getattr(args, "device", None) or "dx5ii"]
+    spec = DEVICES[_key(args)]
     n = band_count(spec)
-    dx1 = spec.get("protocol") == "dx1"
-    if dx1:
+    frames = plan_flat(spec)
+    if spec.get("protocol") == "dx1":
         print("DX1 II: flattening the ACTIVE PEQ config slot (one of 3).")
-    dev = Device(
-        args.dry_run,
-        getattr(args, "device", None),
-        allow_unverified=getattr(args, "unverified", False),
-    )
-    for i in range(REG_COUNT):
-        for f in band_frames(i, DEFAULT_BAND):
-            dev.send(f, f"band{i + 1} default")
-    if not dx1:
-        dev.commit()
-    dev.close()
+    send_plan(args, frames)
     if not args.dry_run:
         st = load_state()
         st["bands"] = [dict(DEFAULT_BAND) for _ in range(n)]
@@ -994,29 +1322,18 @@ def cmd_flat(args):
         print(f"all {n} bands disabled.")
 
 
+@exits_on_refusal
 def cmd_preamp(args):
     assert_writable(args)
     db = args.db
-    if not -40.0 <= db <= 10.0:
-        sys.exit(f"preamp {db} dB out of range (-40..+10)")
+    frames = plan_preamp(DEVICES[_key(args)], db)
     v = db_to_q25(db)
     if db > 0:
         print(
             f"  warning: positive preamp ({db:+.1f} dB) can clip. AutoEQ presets"
             f" are always negative."
         )
-    spec = DEVICES[getattr(args, "device", None) or "dx5ii"]
-    dx1 = spec.get("protocol") == "dx1"
-    dev = Device(
-        args.dry_run,
-        getattr(args, "device", None),
-        allow_unverified=getattr(args, "unverified", False),
-    )
-    for f in preamp_frames(db):
-        dev.send(f, f"preamp {db:+.1f} dB")
-    if not dx1:
-        dev.commit()
-    dev.close()
+    send_plan(args, frames)
     if not args.dry_run:
         st = load_state()
         st["preamp_db"] = db
@@ -1024,15 +1341,9 @@ def cmd_preamp(args):
         print(f"preamp {db:+.1f} dB  (raw {v} = 0x{v:08X})")
 
 
-def cmd_vol(args):
-    assert_writable(args)
-    db = args.db
-    if not VOL_MIN_DB <= db <= VOL_MAX_DB:
-        sys.exit(f"volume {db} dB out of range ({VOL_MIN_DB}..{VOL_MAX_DB})")
-    key = getattr(args, "device", None) or "dx5ii"
-    spec = DEVICES[key]
-    if spec.get("protocol") == "dx1":
-        return cmd_vol_dx1(args, spec)
+def read_vol_step(args):
+    """dB per raw volume step: --vol-step, else 0.5 under --dry-run, else
+    volumeStep read from the device."""
     # The raw unit is NOT fixed at half a dB: volumeStep (settings field 32)
     # selects it. Measured on a DX5 II against the front panel, 2026-08-27:
     #   half_db: raw 60 -> -30.0 dB          one_db: raw 25 -> -25.0 dB
@@ -1044,7 +1355,6 @@ def cmd_vol(args):
     # writer opens one. read_settings() calls open_checked() internally, so
     # holding a Device open across it would mean two handles on a device that
     # only grants one -- and it takes a device KEY, not a Device instance.
-    step_db = 0.5
     if getattr(args, "vol_step", None):
         # Explicit override. Needed because the settings READ is model-specific
         # and can fail on a device whose WRITE path may still be fine: a D90 III
@@ -1053,199 +1363,107 @@ def cmd_vol(args):
         # whether its register map matches. Its manual documents the step
         # directly -- fixed 0.5 dB above -50 dB -- so the number does not have
         # to be discovered by reading the device.
-        step_db = float(args.vol_step)
-    elif not args.dry_run:
-        try:
-            import devstate  # local: devstate imports this module
+        return float(args.vol_step)
+    if args.dry_run:
+        return 0.5
+    try:
+        import devstate  # local: devstate imports this module
 
-            step_db = 1.0 if devstate.read_settings(key)[32] == 1 else 0.5
-        except Exception as e:  # noqa: BLE001 - deliberate
-            # Refuse rather than guess: a wrong scale silently doubles or
-            # halves every level on a headphone amp.
-            sys.exit(
-                f"cannot read volumeStep to determine the dB scale: {e}\n"
-                "If this model's step is documented, pass it explicitly: "
-                "--vol-step 0.5"
-            )
-    steps = int(round(-db / step_db))
-    actual = -steps * step_db
-    # Guard before anything is opened or sent.
-    if db > VOL_WARN_DB and not args.force:
-        sys.exit(f"{actual:+.1f} dB is loud — re-run with --force if you mean it")
-    dev = Device(
-        args.dry_run,
-        getattr(args, "device", None),
-        allow_unverified=getattr(args, "unverified", False),
-    )
-    dev.send(frame(REG_CTRL, SUB_VOLUME, steps), f"volume {actual:+.1f} dB ({step_db} dB/step)")
-    dev.commit()
-    dev.close()
+        return 1.0 if devstate.read_settings(_key(args))[32] == 1 else 0.5
+    except Exception as e:  # noqa: BLE001 - deliberate
+        # Refuse rather than guess: a wrong scale silently doubles or
+        # halves every level on a headphone amp.
+        raise Refused(
+            f"cannot read volumeStep to determine the dB scale: {e}\n"
+            "If this model's step is documented, pass it explicitly: "
+            "--vol-step 0.5"
+        ) from e
+
+
+@exits_on_refusal
+def cmd_vol(args):
+    assert_writable(args)
+    db = args.db
+    check_volume_range(db)
+    spec = DEVICES[_key(args)]
+    if spec.get("protocol") == "dx1":
+        frames = plan_volume(spec, db, None, args.force, getattr(args, "target", "all"))
+        send_plan(args, frames)
+        if not args.dry_run:
+            raw = dx1_db_to_raw(db)
+            cur = DX1_VOL_TARGETS[getattr(args, "target", "all")]
+            st = load_state()
+            st["volume_db"] = dx1_raw_to_db(raw)
+            save_state(st)
+            print(f"volume {dx1_raw_to_db(raw):+.1f} dB  (block frame {cur}, raw {raw})")
+        return
+    step_db = read_vol_step(args)
+    # Guarded inside plan_volume, before anything is opened or sent.
+    frames = plan_volume(spec, db, step_db, args.force)
+    send_plan(args, frames)
     if not args.dry_run:
+        steps, actual = volume_steps(db, step_db)
         st = load_state()
         st["volume_db"] = actual
         save_state(st)
         print(f"volume {actual:+.1f} dB  (raw {steps})")
 
 
-def cmd_vol_dx1(args, spec):
-    """Volume on the DX1 II lives in the 0x810a output-state block, not at
-    0x7102: writing the DX5 II register is silently ignored by this firmware
-    (measured 2026-08-08 -- the front panel never moved). The block's frame 5
-    is loHpVolume, the knob's "all outputs" target; frames 3/4 address the
-    hp/lo memories individually. The device pushes the written frame back,
-    which this tool does not yet verify -- the read side lives in
-    readsettings.py. Front-panel-confirmed on hardware."""
-    raw = dx1_db_to_raw(args.db)
-    if args.db > VOL_WARN_DB and not args.force:
-        sys.exit(f"{args.db:+.1f} dB is loud — re-run with --force if you mean it")
-    cur = {"all": DX1_F_LOHP_VOL, "hp": DX1_F_HP_VOL, "lo": DX1_F_LO_VOL}[args.target]
-    dev = Device(
-        args.dry_run,
-        getattr(args, "device", None),
-        allow_unverified=getattr(args, "unverified", False),
-    )
-    dev.send(
-        dx1_block_frame(cur, raw), f"dx1 volume {args.db:+.1f} dB (block frame {cur}, raw {raw})"
-    )
-    dev.close()
-    if not args.dry_run:
-        st = load_state()
-        st["volume_db"] = dx1_raw_to_db(raw)
-        save_state(st)
-        print(f"volume {dx1_raw_to_db(raw):+.1f} dB  (block frame {cur}, raw {raw})")
-
-
+@exits_on_refusal
 def cmd_mute(args):
     assert_writable(args)
-    spec = DEVICES[getattr(args, "device", None) or "dx5ii"]
-    if spec.get("protocol") != "dx1":
-        # 0x7103 exists in the vendor table but was never driven on DX5 II
-        # hardware, and a mute that silently fails is worse than no mute.
-        sys.exit(
-            "mute: not implemented for the DX5 II -- register 0x7103 is "
-            "vendor-sourced but hardware-unverified; use the vendor app "
-            "or the remote. The DX1 II mute needs --device dx1ii --unverified."
-        )
-    dev = Device(
-        args.dry_run,
-        getattr(args, "device", None),
-        allow_unverified=getattr(args, "unverified", False),
-    )
-    dev.send(
-        dx1_block_frame(DX1_F_MUTE, DX1_MUTE[args.state]),
-        f"dx1 mute {args.state} (block frame {DX1_F_MUTE}, raw {DX1_MUTE[args.state]})",
-    )
-    dev.close()
+    send_plan(args, plan_mute(DEVICES[_key(args)], args.state))
     if not args.dry_run:
         print(f"mute {args.state}")
 
 
+@exits_on_refusal
 def cmd_input(args):
     assert_writable(args)
-    spec = DEVICES[getattr(args, "device", None) or "dx5ii"]
-    if spec.get("protocol") != "dx1":
-        sys.exit(
-            "input: not implemented for the DX5 II (0x7104 unverified on "
-            "hardware); setctl.py exposes the fields that read back there."
-        )
-    raw = 0 if args.source == "usb" else 1
-    dev = Device(
-        args.dry_run,
-        getattr(args, "device", None),
-        allow_unverified=getattr(args, "unverified", False),
-    )
-    dev.send(frame(*DX1_REG_INPUT, raw), f"dx1 input {args.source}")
-    dev.close()
+    send_plan(args, plan_input(DEVICES[_key(args)], args.source))
     if not args.dry_run:
         print(f"input {args.source}")
 
 
+@exits_on_refusal
 def cmd_filter(args):
     assert_writable(args)
-    spec = DEVICES[getattr(args, "device", None) or "dx5ii"]
-    if spec.get("protocol") != "dx1":
-        sys.exit(
-            "filter: for the DX5 II use setctl.py pcmFilter (read-back "
-            "verified there); this command implements the DX1 II register."
-        )
-    raw = args.filter.lower()
-    if raw.startswith("f") and raw[1:].isdigit():
-        raw = int(raw[1:]) - 1
-    else:
-        sys.exit("filter takes f1..f8 (or 0..7)")
-    if not 0 <= raw <= 7:
-        sys.exit("filter takes f1..f8 (or 0..7)")
-    dev = Device(
-        args.dry_run,
-        getattr(args, "device", None),
-        allow_unverified=getattr(args, "unverified", False),
-    )
-    dev.send(frame(*DX1_REG_FILTER, raw), f"dx1 pcm filter f{raw + 1}")
-    dev.close()
+    frames = plan_filter(DEVICES[_key(args)], args.filter)
+    send_plan(args, frames)
     if not args.dry_run:
-        print(f"filter f{raw + 1}")
+        print(f"filter f{parse_filter(args.filter) + 1}")
 
 
+def read_eq_slot(key):
+    """The DX1 II's active PEQ slot, from 0x1206 (report-only). Read through
+    devstate so the report-id prefix is applied."""
+    import devstate
+
+    h = open_checked(key)
+    try:
+        return devstate.dx1_query(h, *DX1_REG_QUERY_CFG)
+    finally:
+        h.close()
+
+
+@exits_on_refusal
 def cmd_eq(args):
-    """EQ on/off and slot select for the DX1 II. switchMcuConfig (0x110e)
-    selects which of the 3 stored PEQ slots is active, with 0xffffffff = EQ
-    off. Writing 0x1204/0x1206 directly does NOT work -- they are report-only
-    (measured: 0x1204 write left the state at 7)."""
+    """EQ on/off and slot select for the DX1 II; see plan_eq."""
     assert_writable(args)
-    spec = DEVICES[getattr(args, "device", None) or "dx5ii"]
-    if spec.get("protocol") != "dx1":
-        sys.exit("eq: only implemented for the DX1 II's 3-slot PEQ.")
-    if args.state == "off":
-        value, label = 0xFFFFFFFF, "eq off"
-    elif args.state == "on":
-        # Re-enable the last active slot. 0x1206 is report-only; the live
-        # path reads it through devstate so the report-id prefix is applied.
-        # --dry-run must not open the device: the slot is filled in only when
-        # the frame is actually sent, and the printed write uses slot 1.
-        if args.dry_run:
-            value, label = 0, "eq on (dry-run assumes slot 1; live run reads 0x1206)"
-        else:
-            import devstate
-
-            h = open_checked(getattr(args, "device", None) or "dx5ii")
-            try:
-                val = devstate.dx1_query(h, *DX1_REG_QUERY_CFG)
-            finally:
-                h.close()
-            if val is None or val > 2:
-                val = 0
-            value, label = val, f"eq on (slot {val + 1})"
-    else:
-        slot = int(args.state)
-        if not 1 <= slot <= 3:
-            sys.exit("eq takes on, off, or a slot number 1-3")
-        value, label = slot - 1, f"eq slot {slot}"
-    dev = Device(
-        args.dry_run,
-        getattr(args, "device", None),
-        allow_unverified=getattr(args, "unverified", False),
-    )
-    dev.send(frame(*DX1_REG_SWITCH_CFG, value), label)
-    dev.close()
+    # --dry-run must not open the device: the slot is filled in only when the
+    # frame is actually sent, and the printed write uses slot 1.
+    read_slot = None if args.dry_run else functools.partial(read_eq_slot, _key(args))
+    frames = plan_eq(DEVICES[_key(args)], args.state, read_slot)
+    send_plan(args, frames)
     if not args.dry_run:
-        print(label)
+        print(frames[0].label)
 
 
+@exits_on_refusal
 def cmd_gain(args):
     assert_writable(args)
     on = args.state == "on"
-    spec = DEVICES[getattr(args, "device", None) or "dx5ii"]
-    dev = Device(
-        args.dry_run,
-        getattr(args, "device", None),
-        allow_unverified=getattr(args, "unverified", False),
-    )
-    if spec.get("protocol") == "dx1":
-        dev.send(frame(*DX1_REG_HIGH_GAIN, 1 if on else 0), f"gain {args.state}")
-    else:
-        dev.send(frame(REG_CTRL, SUB_GAIN, 1 if on else 0), f"gain {args.state}")
-        dev.commit()
-    dev.close()
+    send_plan(args, plan_gain(DEVICES[_key(args)], on))
     if not args.dry_run:
         st = load_state()
         st["gain"] = on
@@ -1254,29 +1472,15 @@ def cmd_gain(args):
         print("note: the vendor app only exposes gain on headphone outputs.")
 
 
+@exits_on_refusal
 def cmd_power(args):
     assert_writable(args)
-    on = args.state == "on"
-    spec = DEVICES[getattr(args, "device", None) or "dx5ii"]
-    dev = Device(
-        args.dry_run,
-        getattr(args, "device", None),
-        allow_unverified=getattr(args, "unverified", False),
-    )
-    if spec.get("protocol") == "dx1":
-        # Standby/wake is dx1State: 2 = standby, 1 = working. No checksum, no
-        # commit; the device pushes its state back. Verified asleep and awake
-        # on hardware.
-        dev.send(frame(*DX1_REG_STATE, 1 if on else 2), f"power {args.state}")
-    else:
-        dev.send(
-            frame(REG_CTRL, SUB_POWER, int(on), b4=SUB_POWER_B4, crc=True), f"power {args.state}"
-        )
-    dev.close()
+    send_plan(args, plan_power(DEVICES[_key(args)], args.state == "on"))
     if not args.dry_run:
         print(f"power {args.state}")
 
 
+@exits_on_refusal
 def cmd_show(args):
     spec = DEVICES[getattr(args, "device", None) or "dx5ii"]
     n = band_count(spec)  # refuse before printing anything, like flat/apply
@@ -1304,6 +1508,7 @@ def cmd_show(args):
     print(f"  ({active} of {n} bands active)")
 
 
+@exits_on_refusal
 def cmd_dump(args):
     st = load_state()
     # A cache written before the 11th register was kept off the preset still
@@ -1431,4 +1636,8 @@ def main():
 
 
 if __name__ == "__main__":
+    # Run as a script this module is __main__, and the lazy `import devstate`
+    # would load a second copy as `toppingctl` -- with its own Refused, which
+    # exits_on_refusal would not catch. Register this copy under its name.
+    sys.modules.setdefault("toppingctl", sys.modules[__name__])
     main()

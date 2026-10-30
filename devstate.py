@@ -3,10 +3,16 @@
 
 import time
 
-from toppingctl import frame, open_checked
+from toppingctl import (
+    DX1_OUT_STATE,
+    DX1_READ_REGS,
+    DX1_REG_PEQ_DUMP,
+    GET_SETTINGS,
+    Refused,
+    frame,
+    open_checked,
+)
 from vendor_commands import ENUMS, FIELD_ENUM, SETTINGS_FIELDS
-
-GET_SETTINGS = (0x71, 0x0C)
 
 # --- DX1 II -------------------------------------------------------------
 # The DX1 II has no 0x710c GetSettings: the read channels are (a) the 12-frame
@@ -44,7 +50,7 @@ def _frames(h, secs):
 
 def dx1_read_block(h, secs=1.5):
     """readNack the 0x810a output-state block -> {frame_index: value}."""
-    h.write(_prefixed(frame(0x81, 0x0A, 0, opcode=0x10)))
+    h.write(_prefixed(frame(DX1_OUT_STATE >> 8, DX1_OUT_STATE & 0xFF, 0, opcode=0x10)))
     return {b[2]: b[3] for b in _frames(h, secs) if b[0] == 0x810A}
 
 
@@ -58,10 +64,9 @@ def dx1_query(h, reg, sub, secs=0.7):
     plausible while they silently reset the user's gain/filter/input to
     defaults, and the zero that came back was the echo of our own
     clobbering. The safe set is what the vendor bundle's
-    requestGroup builder allows -- 0x7100, 0x7900, 0x7d00, 0x810b, 0x810c,
-    0x810a, 0x810d, 0x810e, 0x810f, 0x8200, 0x8300, 0x8400, 0x1204,
-    0x1206. 0x1106, the 3-slot PEQ dump (dx1_read_configs), is queried here
-    too, but it is NOT on the vendor's requestGroup list above -- it is
+    requestGroup builder allows: toppingctl.DX1_VENDOR_READ_SAFE.
+    0x1106, the 3-slot PEQ dump (dx1_read_configs, DX1_REG_PEQ_DUMP), is
+    queried too, but it is NOT on the vendor's requestGroup list -- it is
     read on the strength of one contributor's unmeasured claim ("already
     read and does not zero the slots", PR #16 review) with no recorded
     procedure, date, or firmware version, unlike every other entry in this
@@ -69,7 +74,15 @@ def dx1_query(h, reg, sub, secs=0.7):
     before/after read of the PEQ slots on hardware. Everything else (gain,
     filter, brightness, input, display mode, ...) is write-only for us; its
     state arrives as an unsolicited push after it changes.
+
+    So this refuses, before writing anything, any register outside
+    toppingctl.DX1_READ_REGS (that list plus 0x1106).
     """
+    if (reg, sub) not in DX1_READ_REGS:
+        raise Refused(
+            f"refusing a dx1 readNack to {reg:02x} {sub:02x}: not on the vendor's "
+            "read-safe list, and on this model a readNack there WRITES its data field."
+        )
     h.write(_prefixed(frame(reg, sub, 0, opcode=0x10)))
     hits = [b for b in _frames(h, secs) if b[0] == ((reg << 8) | sub) and b[2] == 1]
     return hits[0][3] if hits else None
@@ -79,7 +92,7 @@ def dx1_read_configs(h, secs=4.5):
     """readNack 0x1106 -> the stored PEQ configs as 78-word lists, in slot
     order. Frames arrive strictly sequential (slot 0's curFrame 0..77, then
     slot 1's, ...); segmented on the curFrame reset, duplicates dropped."""
-    h.write(_prefixed(frame(0x11, 0x06, 0, opcode=0x10)))
+    h.write(_prefixed(frame(*DX1_REG_PEQ_DUMP, 0, opcode=0x10)))
     hits = _frames(h, secs)
     configs, cur = [], {}
     for cmdr, ln, cf, val in hits:
@@ -96,31 +109,39 @@ def dx1_read_configs(h, secs=4.5):
     return configs
 
 
+# The registers dx1_state queries one at a time, by the names readsettings
+# decodes. Every key is on toppingctl.DX1_VENDOR_READ_SAFE (a test holds
+# that); 0x810a comes from dx1_read_block instead, and 0x810d is allowed but
+# not read.
+DX1_STATE_QUERIES = {
+    (0x71, 0x00): "state",
+    (0x79, 0x00): "autoStandby",
+    (0x7D, 0x00): "autoScreenOff",
+    (0x81, 0x0B): "analogBalance",
+    (0x81, 0x0C): "optBalance",
+    (0x81, 0x0E): "remoteArrow",
+    (0x81, 0x0F): "remoteMute",
+    (0x82, 0x00): "knobSingle",
+    (0x83, 0x00): "knobDouble",
+    (0x84, 0x00): "knobEventCaps",
+    (0x12, 0x04): "eqEnableState",
+    (0x12, 0x06): "eqCurrentConfig",
+}
+
+
 def dx1_state(dev_key="dx1ii"):
     """Everything the DX1 II will safely say about itself, decoded by
     readsettings. Queries are restricted to the vendor's read-safe register
-    list (see dx1_query -- anything else turns the readNack into a write of
-    the data field and clobbers the user's settings). The write-only
-    registers (gain, filter, brightness, input, display mode, ...) are
-    deliberately absent: their state only arrives as an unsolicited push."""
+    list (DX1_VENDOR_READ_SAFE; see dx1_query -- anything else turns the
+    readNack into a write of the data field and clobbers the user's
+    settings), plus the unverified 0x1106 dump. The write-only registers
+    (gain, filter, brightness, input, display mode, ...) are deliberately
+    absent: their state only arrives as an unsolicited push."""
     h = open_checked(dev_key)
     try:
         blk = dx1_read_block(h)
         regs = {}
-        for reg, sub, name in [
-            (0x71, 0x00, "state"),
-            (0x79, 0x00, "autoStandby"),
-            (0x7D, 0x00, "autoScreenOff"),
-            (0x81, 0x0B, "analogBalance"),
-            (0x81, 0x0C, "optBalance"),
-            (0x81, 0x0E, "remoteArrow"),
-            (0x81, 0x0F, "remoteMute"),
-            (0x82, 0x00, "knobSingle"),
-            (0x83, 0x00, "knobDouble"),
-            (0x84, 0x00, "knobEventCaps"),
-            (0x12, 0x04, "eqEnableState"),
-            (0x12, 0x06, "eqCurrentConfig"),
-        ]:
+        for (reg, sub), name in DX1_STATE_QUERIES.items():
             regs[name] = dx1_query(h, reg, sub)
         configs = dx1_read_configs(h)
         return {"block": blk, "regs": regs, "configs": configs}
