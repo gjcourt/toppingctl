@@ -22,7 +22,7 @@ import argparse
 import sys
 import time
 
-from toppingctl import frame, open_checked
+from toppingctl import cli_device_lock, frame, open_checked
 from vendor_commands import COMMANDS, PROTOCOL
 
 READ_NACK = 0x10
@@ -69,6 +69,11 @@ def main():
     ap.add_argument("--device", default="dx5ii")
     a = ap.parse_args()
 
+    with cli_device_lock(write=False):
+        listen(a)
+
+
+def listen(a):
     h = open_checked(a.device)
 
     if a.read:

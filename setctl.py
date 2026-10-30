@@ -18,7 +18,7 @@ import argparse
 import sys
 
 import devstate
-from toppingctl import Device, frame
+from toppingctl import Device, cli_device_lock, frame
 from vendor_commands import COMMANDS, ENUMS, FIELD_ENUM
 
 # settings-field name -> (vendor command name, confidence).
@@ -107,6 +107,12 @@ def main():
     else:
         raw = int(a.value)
 
+    # Even --dry-run reads the device here, so it takes the lock as a read.
+    with cli_device_lock(write=not a.dry_run):
+        set_field(a, field, raw, cmd, vendor_name, conf)
+
+
+def set_field(a, field, raw, cmd, vendor_name, conf):
     state = devstate.by_name(a.device)
     if field not in state:
         sys.exit(

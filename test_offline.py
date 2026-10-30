@@ -17,7 +17,11 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -29,9 +33,9 @@ import toppingctl  # noqa: E402
 
 
 def load_dx1_show():
-    """readsettings.py reads the device at import time (argparse and devstate
-    calls at module level), so it can't be imported here. Exec only its
-    imports and function/class defs to get at dx1_show() without hardware."""
+    """readsettings.py parses its arguments when imported as a module of the
+    same name it was written as a script, so exec only its imports and
+    function/class defs to get at dx1_show() without hardware."""
     with open(os.path.join(HERE, "readsettings.py")) as fh:
         tree = ast.parse(fh.read())
     keep = [
@@ -625,6 +629,260 @@ class Dx1EqOnLiveTest(unittest.TestCase):
         self.assertEqual((select[6], select[7]), toppingctl.DX1_REG_SWITCH_CFG)
         self.assertEqual(int.from_bytes(select[8:12], "big"), 2)
         self.assertIn("eq on (slot 3)", out)
+
+
+# Holds the device lock in another process until its stdin closes. Named
+# toppingd.py when written out, so the holder it reports reads like the agent.
+LOCK_HOLDER = """
+import sys
+sys.path.insert(0, {here!r})
+import toppingctl
+toppingctl.LOCK_SYSTEM_DIR = sys.argv[1]
+with toppingctl.device_lock(float(sys.argv[2]) if sys.argv[2:] else 0):
+    print("held", flush=True)
+    sys.stdin.read()
+"""
+
+
+class DeviceLockTest(unittest.TestCase):
+    """The device lock (TOPPINGCTL-4): fixed path, contention between
+    processes, reentrancy, and the CLI's busy message. LOCK_SYSTEM_DIR and
+    HOME point into a temp dir, so nothing here touches the real lock."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = tmp.name
+        self.sysdir = os.path.join(self.tmp, "var-lib-toppingctl")
+        os.mkdir(self.sysdir)
+        self.holder_script = os.path.join(self.tmp, "toppingd.py")
+        with open(self.holder_script, "w") as fh:
+            fh.write(LOCK_HOLDER.format(here=HERE))
+        env = {"HOME": os.path.join(self.tmp, "home")}
+        env.pop("TOPPINGCTL_STATE_DIR", None)
+        for p in (
+            mock.patch.object(toppingctl, "LOCK_SYSTEM_DIR", self.sysdir),
+            mock.patch.dict(os.environ, env),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+        os.environ.pop("TOPPINGCTL_STATE_DIR", None)
+        self.addCleanup(lambda: self.assertEqual(toppingctl._lock["depth"], 0))
+
+    def hold(self, env=None):
+        """Start a holder process; returns it once it has the lock."""
+        proc = subprocess.Popen(
+            [sys.executable, self.holder_script, self.sysdir],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        self.addCleanup(proc.wait, 10)
+        self.addCleanup(proc.stdin.close)
+        self.addCleanup(proc.stdout.close)
+        self.assertEqual(proc.stdout.readline().strip(), "held")
+        return proc
+
+    def release(self, proc):
+        proc.stdin.close()
+        proc.wait(10)
+
+    def test_two_processes_contend(self):
+        proc = self.hold()
+        with self.assertRaises(toppingctl.DeviceBusy) as cm:
+            toppingctl.acquire_device_lock(0.2)
+        self.assertEqual(cm.exception.holder, f"toppingd.py (pid {proc.pid})")
+        self.release(proc)
+        with toppingctl.device_lock(0.2):
+            self.assertEqual(toppingctl._lock["depth"], 1)
+
+    def contend(self):
+        """Run a second holder process against a lock this one holds."""
+        return subprocess.run(
+            [sys.executable, self.holder_script, self.sysdir, "0.1"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_a_waiter_gets_the_lock_once_it_is_released(self):
+        proc = self.hold()
+        timer = threading.Timer(0.3, self.release, (proc,))
+        timer.start()
+        self.addCleanup(timer.join)
+        t0 = time.monotonic()
+        with toppingctl.device_lock(5):
+            self.assertGreaterEqual(time.monotonic() - t0, 0.25)
+
+    def test_lock_is_reentrant_within_a_process(self):
+        with toppingctl.device_lock(0):
+            with toppingctl.device_lock(0):
+                self.assertEqual(toppingctl._lock["depth"], 2)
+            self.assertEqual(toppingctl._lock["depth"], 1)
+            self.assertIn("DeviceBusy", self.contend().stderr)
+        self.assertIsNone(toppingctl._lock["fd"])
+
+    def run_main(self, argv):
+        out = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(toppingctl, "CLI_LOCK_WAIT", 0.3),
+            contextlib.redirect_stdout(out),
+        ):
+            toppingctl.main()
+        return out.getvalue()
+
+    def test_cmd_vol_runs_under_the_lock_without_blocking_itself(self):
+        """main() takes the lock, and cmd_vol's volumeStep read and write run
+        inside it. Here the test already holds it too, as the agent will
+        around an operation: without reentrancy main() would wait out
+        CLI_LOCK_WAIT on its own lock and exit busy."""
+        writes = []
+        reply = [_settings_record(32, 1)]
+
+        class Handle(_make_fake_hid(writes)):
+            def read(self, *a, **kw):
+                return reply.pop() if reply else b""
+
+        fast_read = functools.partial(devstate.read_settings, secs=0.2)
+        with (
+            mock.patch.object(toppingctl.hid, "Device", Handle),
+            mock.patch.object(toppingctl.hid, "enumerate", _fake_enumerate("DX5II")),
+            mock.patch.object(devstate, "read_settings", fast_read),
+            mock.patch.object(toppingctl, "load_state", dict),
+            mock.patch.object(toppingctl, "save_state", lambda st: None),
+            toppingctl.device_lock(0),
+        ):
+            out = self.run_main(["toppingctl.py", "vol", "-30"])
+            self.assertEqual(toppingctl._lock["depth"], 1)
+        self.assertEqual(writes[1], toppingctl.frame(0x71, 0x02, 30))
+        self.assertIn("volume -30.0 dB  (raw 30)", out)
+
+    def test_cli_message_names_the_holder_and_sends_nothing(self):
+        proc = self.hold()
+
+        def no_device(*a, **kw):
+            raise AssertionError("opened the device without the lock")
+
+        with (
+            mock.patch.object(toppingctl.hid, "Device", no_device),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            self.run_main(["toppingctl.py", "vol", "-30"])
+        msg = str(cm.exception.code)
+        self.assertIn(f"is in use by toppingd.py (pid {proc.pid}). Try again.", msg)
+        self.assertTrue(msg.startswith("The DAC on "))
+
+    def test_dry_run_does_not_wait_for_the_lock(self):
+        self.hold()
+        out = self.run_main(["toppingctl.py", "--dry-run", "vol", "-30"])
+        self.assertIn("vol", out)
+
+    def test_holder_named_from_its_record_without_proc_locks(self):
+        """macOS has no /proc/locks: the holder's own record names it, as
+        long as that pid is still alive."""
+        proc = self.hold()
+        with (
+            mock.patch.object(toppingctl, "_proc_locks_holder", lambda fd: None),
+            self.assertRaises(toppingctl.DeviceBusy) as cm,
+        ):
+            toppingctl.acquire_device_lock(0)
+        self.assertEqual(cm.exception.holder, f"toppingd.py (pid {proc.pid})")
+        with open(toppingctl.lock_path(), "w") as fh:
+            fh.write("toppingd.py 999999999\n")  # no such pid
+        fd = os.open(toppingctl.lock_path(), os.O_RDONLY)
+        self.addCleanup(os.close, fd)
+        with mock.patch.object(toppingctl, "_proc_locks_holder", lambda fd: None):
+            self.assertIsNone(toppingctl.lock_holder(fd))
+
+    def test_record_is_cleared_on_release(self):
+        with toppingctl.device_lock(0, prog="toppingctl.py"):
+            with open(toppingctl.lock_path()) as fh:
+                self.assertEqual(fh.read(), f"toppingctl.py {os.getpid()}\n")
+        with open(toppingctl.lock_path()) as fh:
+            self.assertEqual(fh.read(), "")
+
+    def test_sudo_without_the_wrapper_finds_the_same_lock(self):
+        """sudo changes HOME and drops the wrapper's TOPPINGCTL_STATE_DIR;
+        neither moves the lock while the system directory exists."""
+        path = toppingctl.lock_path()
+        self.assertEqual(path, os.path.join(self.sysdir, "device.lock"))
+        root_env = dict(os.environ, HOME=os.path.join(self.tmp, "root"))
+        root_env.pop("TOPPINGCTL_STATE_DIR", None)
+        proc = self.hold(env=root_env)
+        state_dir = os.path.join(self.tmp, "state")
+        with (
+            mock.patch.dict(os.environ, {"TOPPINGCTL_STATE_DIR": state_dir}),
+            self.assertRaises(toppingctl.DeviceBusy) as cm,
+        ):
+            self.assertEqual(toppingctl.lock_path(), path)
+            toppingctl.acquire_device_lock(0.1)
+        self.assertIn(str(proc.pid), cm.exception.holder)
+
+    def test_falls_back_to_home_without_the_system_dir(self):
+        os.rmdir(self.sysdir)
+        home = os.environ["HOME"]
+        self.assertEqual(toppingctl.lock_path(), os.path.join(home, ".toppingctl", "device.lock"))
+        with toppingctl.device_lock(0):
+            self.assertTrue(os.path.exists(toppingctl.lock_path()))
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores file permissions")
+    def test_read_only_lock_file_still_locks(self):
+        """The installer's file is root:toppingd 0644, so the agent opens it
+        read-only; flock works on that, and nothing is recorded."""
+        path = toppingctl.lock_path()
+        open(path, "w").close()
+        os.chmod(path, 0o444)
+        with toppingctl.device_lock(0):
+            self.assertFalse(toppingctl._lock["writable"])
+            self.assertIn("DeviceBusy", self.contend().stderr)
+            fd = os.open(path, os.O_RDONLY)
+            self.addCleanup(os.close, fd)
+            holder = toppingctl.lock_holder(fd)
+            self.assertIn(f"(pid {os.getpid()})", holder)
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores file permissions")
+    def test_unopenable_lock_refuses_writes_and_warns_reads(self):
+        """/var/lib/toppingctl exists but its lock file is gone and the caller
+        can't recreate it."""
+        os.chmod(self.sysdir, 0o555)
+        self.addCleanup(os.chmod, self.sysdir, 0o755)
+        with self.assertRaises(SystemExit) as cm, toppingctl.cli_device_lock(write=True):
+            raise AssertionError("ran a write without the lock")
+        self.assertIn("Refusing to write.", str(cm.exception.code))
+        err = io.StringIO()
+        ran = []
+        with contextlib.redirect_stderr(err), toppingctl.cli_device_lock(write=False):
+            ran.append(True)
+        self.assertEqual(ran, [True])
+        self.assertIn("reading without it", err.getvalue())
+
+
+class StateDirTest(unittest.TestCase):
+    """TOPPINGCTL_STATE_DIR moves the state cache, and only the cache."""
+
+    def state_file(self, env):
+        out = subprocess.run(
+            [sys.executable, "-c", "import toppingctl; print(toppingctl.STATE_FILE)"],
+            cwd=HERE,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return out.stdout.strip()
+
+    def test_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = dict(os.environ, TOPPINGCTL_STATE_DIR=tmp)
+            self.assertEqual(self.state_file(env), os.path.join(tmp, "state.json"))
+
+    def test_default_is_home(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = dict(os.environ, HOME=tmp)
+            env.pop("TOPPINGCTL_STATE_DIR", None)
+            self.assertEqual(self.state_file(env), os.path.join(tmp, ".toppingctl", "state.json"))
 
 
 GOLDEN = os.path.join(HERE, "fixtures", "dry_run_golden.json")

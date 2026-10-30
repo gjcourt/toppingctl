@@ -58,6 +58,13 @@ D90 III's UAC2-only volume) and the device-verification workflow are in
 | `--unverified` | off | Allow writes to a device whose register map isn't confirmed. |
 | `--force` | off | `vol` option: allow levels above −10 dB. |
 | `--vol-step` | read from device | Override the dB-per-step, for models that don't support a settings read. |
+| `TOPPINGCTL_STATE_DIR` | `~/.toppingctl` | Environment variable: where the last-written cache (`state.json`) lives. |
+
+Every command that opens the device first takes an advisory lock,
+`/var/lib/toppingctl/device.lock` if that directory exists, else
+`~/.toppingctl/device.lock`. The lock path ignores `TOPPINGCTL_STATE_DIR`, so a
+run under `sudo` contends for the same lock. If another process holds it, the
+command waits up to 15 s, then exits naming the holder.
 
 ## How it works
 

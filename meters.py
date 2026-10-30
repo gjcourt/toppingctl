@@ -14,7 +14,7 @@ import argparse
 import sys
 import time
 
-from toppingctl import frame, open_checked
+from toppingctl import cli_device_lock, frame, open_checked
 
 VU, FFT = 0x7130, 0x7131
 
@@ -49,6 +49,11 @@ def main():
     ap.add_argument("--device", default="dx5ii")
     a = ap.parse_args()
 
+    with cli_device_lock(write=False):
+        return meter(a)
+
+
+def meter(a):
     h = open_checked(a.device)
     # The heartbeat is the whole gate. The vendor app sends Heartbeat (0x7134)
     # every 5 s; without it the device goes quiet. The display page is NOT a

@@ -32,18 +32,21 @@ NOTE ON READING THE DEVICE.
 The device CAN be read: `readsettings.py` / `devstate.read_settings()` query it
 and return live state. (An earlier version of this file said reads were only an
 echo; that was superseded by the read work and is no longer true.) What is still
-cached in ~/.toppingctl/state.json is the PEQ band state, which the tool tracks
-locally because it is not read back. Anything changed
-via the front panel, the remote, or the vendor app is invisible to us and will
-make the cache stale. `apply` always writes every band, so a preset is still
+cached in ~/.toppingctl/state.json (or $TOPPINGCTL_STATE_DIR/state.json) is the
+PEQ band state, which the tool tracks locally because it is not read back.
+Anything changed via the front panel, the remote, or the vendor app is invisible
+to us and will make the cache stale. `apply` always writes every band, so a preset is still
 applied correctly regardless of cache accuracy.
 """
 
 import argparse
+import contextlib
+import fcntl
 import functools
 import json
 import os
 import re
+import socket
 import sys
 import time
 from typing import NamedTuple
@@ -489,8 +492,18 @@ CONFIRMED_READS = {
     "dx1ii": frozenset(DX1_READ_REGS) - {DX1_REG_PEQ_DUMP},
 }
 
-STATE_DIR = os.path.expanduser("~/.toppingctl")
+# TOPPINGCTL_STATE_DIR moves the "last written" cache, so the CLI wrapper and
+# the planned agent can share one in /var/lib/toppingctl. The device lock
+# deliberately does not follow it (see lock_path).
+STATE_DIR = os.environ.get("TOPPINGCTL_STATE_DIR") or os.path.expanduser("~/.toppingctl")
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
+
+# The device lock's fixed home: the system directory where it exists (every
+# agent host), else ~/.toppingctl on a CLI-only machine.
+LOCK_SYSTEM_DIR = "/var/lib/toppingctl"
+LOCK_NAME = "device.lock"
+# Covers a default `listen.py` run (10 s) or a preset send, with margin.
+CLI_LOCK_WAIT = 15.0
 
 # Volume is attenuation in half-dB steps. Clamp hard: a wrong value here is
 # instantly loud into headphones, and that is the one irreversible mistake this
@@ -859,6 +872,190 @@ def save_state(st):
     os.makedirs(STATE_DIR, exist_ok=True)
     with open(STATE_FILE, "w") as fh:
         json.dump(st, fh, indent=2)
+
+
+# --- device lock ------------------------------------------------------------
+#
+# The device grants one handle, so every entry point that opens it takes an
+# advisory flock in its main(), once per command -- not per open, because
+# cmd_vol reads volumeStep and closes before it opens the writer, and another
+# process must not slip in between. Library code (devstate, Device) never
+# takes it. The lock is reentrant within a process: a depth counter around
+# one fd.
+
+
+class DeviceBusy(Exception):
+    """The device lock stayed held for the whole wait. `holder` names the
+    process holding it, e.g. "toppingd (pid 812)", or is None if unknown."""
+
+    def __init__(self, holder):
+        self.holder = holder
+        super().__init__(f"device lock held by {holder or 'an unknown process'}")
+
+
+_lock = {"fd": None, "depth": 0, "writable": False}
+
+
+def lock_path():
+    """Fixed, and independent of TOPPINGCTL_STATE_DIR, so a run under sudo
+    without the wrapper still contends for the same lock as the agent."""
+    if os.path.isdir(LOCK_SYSTEM_DIR):
+        return os.path.join(LOCK_SYSTEM_DIR, LOCK_NAME)
+    return os.path.join(os.path.expanduser("~/.toppingctl"), LOCK_NAME)
+
+
+def _open_lock(path):
+    """-> (fd, writable). Read-write where allowed, so the holder can be
+    recorded; read-only otherwise, which flock accepts. The installer's file
+    is root:toppingd 0644, so the agent always lands here read-only."""
+    if not path.startswith(LOCK_SYSTEM_DIR + os.sep):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    try:
+        return os.open(path, os.O_RDWR | os.O_CREAT, 0o644), True
+    except PermissionError:
+        return os.open(path, os.O_RDONLY), False
+
+
+def _program(argv):
+    """The script a cmdline runs: `python3 /x/toppingctl.py vol -30` ->
+    toppingctl.py, `/usr/bin/toppingd` -> toppingd."""
+    prog = os.path.basename(argv[0]) if argv else ""
+    if prog.startswith("python") and len(argv) > 1 and not argv[1].startswith("-"):
+        prog = os.path.basename(argv[1])
+    return prog or "?"
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    return True
+
+
+def _proc_locks_holder(fd):
+    """Linux: the pid holding a flock on fd's file, from /proc/locks. This
+    names a holder that opened the file read-only and so couldn't record
+    itself -- the agent, always. None where /proc/locks doesn't exist."""
+    st = os.fstat(fd)
+    want = (os.major(st.st_dev), os.minor(st.st_dev), st.st_ino)
+    try:
+        with open("/proc/locks") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return None
+    for line in lines:
+        f = line.split()
+        if len(f) < 6 or f[1] != "FLOCK":
+            continue  # waiters ("->"), POSIX and OFD locks
+        try:
+            maj, mnr, ino = f[5].split(":")
+            if (int(maj, 16), int(mnr, 16), int(ino)) == want:
+                return int(f[4])
+        except ValueError:
+            continue
+    return None
+
+
+def lock_holder(fd):
+    """'<program> (pid N)' for whoever holds the lock on fd's file, or None."""
+    pid = _proc_locks_holder(fd)
+    if pid is not None:
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                argv = [a.decode(errors="replace") for a in fh.read().split(b"\0") if a]
+            return f"{_program(argv)} (pid {pid})"
+        except OSError:
+            return f"pid {pid}"
+    # No /proc (macOS): fall back to what the holder wrote, if it is alive.
+    try:
+        prog, pid = os.pread(fd, 256, 0).decode(errors="replace").split()
+        pid = int(pid)
+    except (OSError, ValueError):
+        return None
+    return f"{prog} (pid {pid})" if _alive(pid) else None
+
+
+def acquire_device_lock(wait, prog=None):
+    """Take the device lock, polling for up to `wait` seconds, else raise
+    DeviceBusy. Reentrant: a process already holding it just goes deeper.
+    OSError if the lock file can't be opened at all."""
+    if _lock["depth"]:
+        _lock["depth"] += 1
+        return
+    fd, writable = _open_lock(lock_path())
+    deadline = time.monotonic() + wait
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise DeviceBusy(lock_holder(fd)) from None
+                time.sleep(0.05)
+    except BaseException:
+        os.close(fd)
+        raise
+    if writable:
+        # Best effort: the record only helps name a holder without /proc.
+        record = f"{prog or _program(sys.argv)} {os.getpid()}\n".encode()
+        with contextlib.suppress(OSError):
+            os.ftruncate(fd, 0)
+            os.pwrite(fd, record, 0)
+    _lock.update(fd=fd, depth=1, writable=writable)
+
+
+def release_device_lock():
+    _lock["depth"] -= 1
+    if _lock["depth"]:
+        return
+    fd, writable = _lock["fd"], _lock["writable"]
+    _lock.update(fd=None, writable=False)
+    if writable:
+        with contextlib.suppress(OSError):
+            os.ftruncate(fd, 0)
+    os.close(fd)  # closing the only fd drops the flock
+
+
+@contextlib.contextmanager
+def device_lock(wait, prog=None):
+    acquire_device_lock(wait, prog)
+    try:
+        yield
+    finally:
+        release_device_lock()
+
+
+def busy_message(holder):
+    who = holder or "toppingd or another toppingctl command"
+    host = socket.gethostname().split(".")[0]
+    return f"The DAC on {host} is in use by {who}. Try again."
+
+
+@contextlib.contextmanager
+def cli_device_lock(write=True):
+    """The device lock for a command-line entry point. Waits CLI_LOCK_WAIT,
+    then exits naming the holder. If the lock file can't be opened, a write
+    refuses and says why; a read warns and runs without it."""
+    try:
+        acquire_device_lock(CLI_LOCK_WAIT)
+    except DeviceBusy as e:
+        sys.exit(busy_message(e.holder))
+    except OSError as e:
+        path = lock_path()
+        if write:
+            sys.exit(f"cannot open the device lock {path}: {e.strerror}. Refusing to write.")
+        print(f"warning: cannot open the device lock {path}: {e.strerror}.", file=sys.stderr)
+        print("  reading without it; another client may interleave.", file=sys.stderr)
+        yield
+        return
+    try:
+        yield
+    finally:
+        release_device_lock()
 
 
 # --- preset parsing ---------------------------------------------------------
@@ -1632,7 +1829,13 @@ def main():
     a.set_defaults(func=cmd_dump)
 
     args = p.parse_args()
-    args.func(args)
+    # --dry-run opens nothing (not even the volumeStep read), and these three
+    # only enumerate or read the cache, so none of them wait for the lock.
+    if args.dry_run or args.cmd in ("devices", "show", "dump"):
+        args.func(args)
+        return
+    with cli_device_lock(write=True):
+        args.func(args)
 
 
 if __name__ == "__main__":
