@@ -500,8 +500,7 @@ function stagePower(sleep) {
   const r = room();
   S.pending = { kind: "power", to: sleep ? "sleep" : "wake",
     what: sleep ? `Put ${r.name} to sleep` : `Wake ${r.name}`,
-    frames: `power register 71 01 = ${sleep ? 0 : 1} (${sleep ? "sleep" : "wake"}), with the checksum the device requires\n` +
-      `commit 71 34` };
+    frames: `power register 71 01 = ${sleep ? 0 : 1} (${sleep ? "sleep" : "wake"}), with the checksum the device requires. One frame; no commit.` };
 }
 
 function presetBlock(r, w) {
