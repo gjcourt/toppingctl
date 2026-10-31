@@ -64,7 +64,12 @@ Every command that opens the device first takes an advisory lock,
 `/var/lib/toppingctl/device.lock` if that directory exists, else
 `~/.toppingctl/device.lock`. The lock path ignores `TOPPINGCTL_STATE_DIR`, so a
 run under `sudo` contends for the same lock. If another process holds it, the
-command waits up to 15 s, then exits naming the holder.
+command waits up to 15 s, then exits naming the holder. The lock is refused (a
+write exits, a read warns) if it is a symlink, a hard link or owned by another
+user. It is also refused if its directory is a symlink or is writable by group or
+others. The two exceptions are a root-owned sticky directory and the agent's
+`root:toppingd` directory. If an older version left `~/.toppingctl` group-writable,
+run `chmod go-w ~/.toppingctl`.
 
 ## How it works
 

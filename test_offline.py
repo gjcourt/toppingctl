@@ -13,10 +13,12 @@ import argparse
 import ast
 import contextlib
 import functools
+import grp
 import io
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -643,17 +645,17 @@ with toppingctl.device_lock(float(sys.argv[2]) if sys.argv[2:] else 0):
 """
 
 
-class DeviceLockTest(unittest.TestCase):
-    """The device lock (TOPPINGCTL-4): fixed path, contention between
-    processes, reentrancy, and the CLI's busy message. LOCK_SYSTEM_DIR and
-    HOME point into a temp dir, so nothing here touches the real lock."""
+class LockTempDirs(unittest.TestCase):
+    """LOCK_SYSTEM_DIR and HOME point into a temp dir, so nothing here
+    touches the real lock."""
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.tmp = tmp.name
         self.sysdir = os.path.join(self.tmp, "var-lib-toppingctl")
-        os.mkdir(self.sysdir)
+        os.mkdir(self.sysdir, 0o755)
+        os.chmod(self.sysdir, 0o755)  # whatever the umask
         self.holder_script = os.path.join(self.tmp, "toppingd.py")
         with open(self.holder_script, "w") as fh:
             fh.write(LOCK_HOLDER.format(here=HERE))
@@ -666,6 +668,11 @@ class DeviceLockTest(unittest.TestCase):
             self.addCleanup(p.stop)
         os.environ.pop("TOPPINGCTL_STATE_DIR", None)
         self.addCleanup(lambda: self.assertEqual(toppingctl._lock["depth"], 0))
+
+
+class DeviceLockTest(LockTempDirs):
+    """The device lock (TOPPINGCTL-4): fixed path, contention between
+    processes, reentrancy, and the CLI's busy message."""
 
     def hold(self, env=None):
         """Start a holder process; returns it once it has the lock."""
@@ -875,6 +882,134 @@ class DeviceLockTest(unittest.TestCase):
             ran.append(True)
         self.assertEqual(ran, [True])
         self.assertIn("reading without it", err.getvalue())
+
+
+def _dir_stat(mode, uid, gid):
+    return os.stat_result((stat.S_IFDIR | mode, 1, 1, 2, uid, gid, 0, 0, 0, 0))
+
+
+class LockHardeningTest(LockTempDirs):
+    """A root run truncates and writes device.lock, so the helper must not be
+    pointed at another file: no symlinks, no hard links, no file owned by a
+    third user, no directory others can plant files in. Each refusal leaves
+    the target untouched."""
+
+    def target(self):
+        path = os.path.join(self.tmp, "precious")
+        with open(path, "w") as fh:
+            fh.write("precious\n")
+        return path
+
+    def assertUntouched(self, path):
+        with open(path) as fh:
+            self.assertEqual(fh.read(), "precious\n")
+
+    def assertRefused(self, reason):
+        with self.assertRaises(toppingctl.UnsafeLock) as cm:
+            toppingctl.acquire_device_lock(0)
+        self.assertIn(reason, cm.exception.strerror)
+        self.assertEqual(toppingctl._lock["depth"], 0)
+
+    def test_symlinked_lock_file_is_refused(self):
+        target = self.target()
+        os.symlink(target, toppingctl.lock_path())
+        self.assertRefused("symbolic link")
+        self.assertUntouched(target)
+
+    def test_dangling_symlink_is_not_followed_to_create(self):
+        target = os.path.join(self.tmp, "nowhere")
+        os.symlink(target, toppingctl.lock_path())
+        self.assertRefused("symbolic link")
+        self.assertFalse(os.path.lexists(target))
+
+    def test_hard_link_is_refused(self):
+        """Stands in for a hard link to a root-owned file: st_nlink is 2
+        whoever owns the target."""
+        target = self.target()
+        os.link(target, toppingctl.lock_path())
+        self.assertRefused("more than one hard link")
+        self.assertUntouched(target)
+
+    def test_file_owned_by_another_user_is_refused(self):
+        path = toppingctl.lock_path()
+        with open(path, "w") as fh:
+            fh.write("precious\n")
+        if os.geteuid() == 0:
+            os.chown(path, 12345, 12345)
+            self.assertRefused("owned by uid 12345")
+        else:
+            # Unprivileged, the test can't chown; pretend to be someone else.
+            with mock.patch.object(os, "geteuid", return_value=os.getuid() + 1):
+                self.assertRefused(f"owned by uid {os.getuid()}")
+        self.assertUntouched(path)
+
+    def test_symlinked_lock_dir_is_refused(self):
+        real = os.path.join(self.tmp, "real")
+        os.rename(self.sysdir, real)
+        os.symlink(real, self.sysdir)
+        self.assertRefused("directory is a symbolic link")
+        self.assertFalse(os.path.exists(os.path.join(real, "device.lock")))
+
+    def test_group_writable_lock_dir_is_refused(self):
+        os.chmod(self.sysdir, 0o775)
+        self.assertRefused("writable by group or others")
+        self.assertFalse(os.path.exists(toppingctl.lock_path()))
+
+    def test_group_writable_home_dir_is_refused(self):
+        os.rmdir(self.sysdir)
+        home_dir = os.path.join(os.environ["HOME"], ".toppingctl")
+        os.makedirs(home_dir)
+        os.chmod(home_dir, 0o775)
+        self.assertRefused("writable by group or others")
+
+    def test_refusal_names_the_path_refuses_writes_and_warns_reads(self):
+        os.symlink(self.target(), toppingctl.lock_path())
+        with self.assertRaises(SystemExit) as cm, toppingctl.cli_device_lock(write=True):
+            raise AssertionError("ran a write without the lock")
+        msg = str(cm.exception.code)
+        self.assertIn(f"{toppingctl.lock_path()}: it is a symbolic link. Refusing to write.", msg)
+        err = io.StringIO()
+        ran = []
+        with contextlib.redirect_stderr(err), toppingctl.cli_device_lock(write=False):
+            ran.append(True)
+        self.assertEqual(ran, [True])
+        self.assertIn("reading without it", err.getvalue())
+
+    def test_normal_paths_still_work(self):
+        with toppingctl.device_lock(0, prog="toppingctl.py"):
+            self.assertTrue(toppingctl._lock["writable"])
+        os.unlink(toppingctl.lock_path())
+        os.rmdir(self.sysdir)
+        with toppingctl.device_lock(0):
+            path = toppingctl.lock_path()
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode) & 0o077, 0)
+            self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(path)).st_mode) & 0o077, 0)
+
+    def test_dir_rule(self):
+        """root:toppingd 2775 is the plan's /var/lib/toppingctl and passes;
+        so does root-owned sticky. Other group-/other-writable dirs don't."""
+        gid = os.getgid()
+        group = grp.getgrgid(gid).gr_name
+        ok = [
+            _dir_stat(0o755, 1000, 1000),
+            _dir_stat(0o2775, 0, gid),
+            _dir_stat(0o1777, 0, 0),
+            _dir_stat(0o3775, 0, 0),
+        ]
+        bad = [
+            _dir_stat(0o2775, 0, 54321),  # root, but not the toppingd group
+            _dir_stat(0o2775, 1000, gid),  # toppingd group, not root-owned
+            _dir_stat(0o2777, 0, gid),  # other-writable, no sticky bit
+            _dir_stat(0o1777, 1000, 1000),  # sticky, but not root-owned
+            _dir_stat(0o757, 1000, 1000),
+        ]
+        with mock.patch.object(toppingctl, "LOCK_GROUP", group):
+            for st in ok:
+                toppingctl._check_lock_dir(st)
+            for st in bad:
+                with self.subTest(mode=oct(st.st_mode), uid=st.st_uid, gid=st.st_gid):
+                    with self.assertRaises(toppingctl.UnsafeLock):
+                        toppingctl._check_lock_dir(st)
 
 
 class StateDirTest(unittest.TestCase):

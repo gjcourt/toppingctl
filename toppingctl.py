@@ -41,12 +41,15 @@ applied correctly regardless of cache accuracy.
 
 import argparse
 import contextlib
+import errno
 import fcntl
 import functools
+import grp
 import json
 import os
 import re
 import socket
+import stat
 import sys
 import threading
 import time
@@ -503,6 +506,8 @@ STATE_FILE = os.path.join(STATE_DIR, "state.json")
 # agent host), else ~/.toppingctl on a CLI-only machine.
 LOCK_SYSTEM_DIR = "/var/lib/toppingctl"
 LOCK_NAME = "device.lock"
+# The one group allowed write access to the lock directory (see _check_lock_dir).
+LOCK_GROUP = "toppingd"
 # Covers a default `listen.py` run (10 s) or a preset send, with margin.
 CLI_LOCK_WAIT = 15.0
 
@@ -870,7 +875,9 @@ def load_state():
 
 
 def save_state(st):
-    os.makedirs(STATE_DIR, exist_ok=True)
+    # 0700: the default ~/.toppingctl also holds the device lock, which
+    # refuses a group- or other-writable directory.
+    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
     with open(STATE_FILE, "w") as fh:
         json.dump(st, fh, indent=2)
 
@@ -906,16 +913,79 @@ def lock_path():
     return os.path.join(os.path.expanduser("~/.toppingctl"), LOCK_NAME)
 
 
+class UnsafeLock(OSError):
+    """The lock file or its directory could be turned against whoever opens
+    it (a root run truncates and writes the file). Handled like any other
+    lock file that can't be opened: a write refuses, a read warns."""
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.strerror = reason
+
+
+def _check_lock_dir(st):
+    """Refuse a lock directory someone else could plant files in: a symlink,
+    or one writable by group or others, unless it is root-owned with the
+    sticky bit, or is the plan's root:toppingd 2775 (group-writable only,
+    for state.json). The fd checks in _open_lock still guard that case."""
+    if stat.S_ISLNK(st.st_mode):
+        raise UnsafeLock("its directory is a symbolic link")
+    if not stat.S_ISDIR(st.st_mode):
+        raise UnsafeLock("its directory is not a directory")
+    if not st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return
+    if st.st_uid == 0 and st.st_mode & stat.S_ISVTX:
+        return
+    if st.st_uid == 0 and not st.st_mode & stat.S_IWOTH:
+        try:
+            if grp.getgrgid(st.st_gid).gr_name == LOCK_GROUP:
+                return
+        except KeyError:
+            pass
+    raise UnsafeLock("its directory is writable by group or others (chmod go-w it)")
+
+
+def _check_lock_file(fd):
+    """The opened lock must be a regular file, owned by us or root, and not
+    a hard link to some other file."""
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        raise UnsafeLock("it is not a regular file")
+    if st.st_uid not in (os.geteuid(), 0):
+        raise UnsafeLock(f"it is owned by uid {st.st_uid}, not this user or root")
+    if st.st_nlink != 1:
+        raise UnsafeLock("it has more than one hard link")
+
+
 def _open_lock(path):
     """-> (fd, writable). Read-write where allowed, so the holder can be
     recorded; read-only otherwise, which flock accepts. The installer's file
-    is root:toppingd 0644, so the agent always lands here read-only."""
-    if not path.startswith(LOCK_SYSTEM_DIR + os.sep):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+    is root:toppingd 0644, so the agent always lands here read-only. Never
+    follows a symlink: a root run truncates this file."""
+    lock_dir = os.path.dirname(path)
+    system = path.startswith(LOCK_SYSTEM_DIR + os.sep)
+    if not system:
+        os.makedirs(lock_dir, mode=0o700, exist_ok=True)
+    _check_lock_dir(os.lstat(lock_dir))
+    flags = os.O_NOFOLLOW | os.O_CLOEXEC
     try:
-        return os.open(path, os.O_RDWR | os.O_CREAT, 0o644), True
-    except PermissionError:
-        return os.open(path, os.O_RDONLY), False
+        try:
+            fd, writable = (
+                os.open(path, os.O_RDWR | os.O_CREAT | flags, 0o644 if system else 0o600),
+                True,
+            )
+        except PermissionError:
+            fd, writable = os.open(path, os.O_RDONLY | flags), False
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            raise UnsafeLock("it is a symbolic link") from None
+        raise
+    try:
+        _check_lock_file(fd)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd, writable
 
 
 def _program(argv):
