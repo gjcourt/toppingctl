@@ -53,7 +53,12 @@ Quoted from the ticket:
 
 ### From TOPPINGCTL-10 (George, 2026-10-31), changing decision 11 for volume
 
-Quoted from the ticket, George's answer to how far the change goes:
+George's original message, quoted from the ticket:
+
+> "I noticed in the toppingctl app that I need to "stage changes" before making them. While I think this is good for large changes (eg: adjusting more than 6dB) for single volume up/down clicks - that extra effort is annoying. Let's adjust the app to not ask for the confirmation step at all - we can debounce the changes in order to make them more efficient"
+
+Asked how far that goes, George chose an option. The scope below is the ticket's summary of that
+option, not George's own words:
 
 13. "all volume changes (+/− steps, slider, typed target) send without a preview, including large
     jumps; the "Allow above −10 dB" unlock stays (decision 3). Presets and sleep/wake keep their
@@ -71,7 +76,11 @@ Interpretations taken with decision 13, to confirm or change:
 - **One unlock covers one Send.** It relocks when the Send starts, on Cancel, and after 60 s.
 - **A queued target is dropped when the write in flight fails or is refused.** The UI shows the
   device's read value and the error, not the dropped target.
-- **Undo above −10 dB needs the unlock**, as any other loud write does.
+- **An undo that lowers the level needs no unlock, even if it lands above −10 dB.** This is an
+  interpretation, not George's decision. The existing rule stands: quieter is always allowed. An
+  undo that raises the level above −10 dB needs the unlock.
+- **Undo returns to the level read before the whole burst** of writes it reverses, not the level
+  before the last write. A burst can be several writes while one is queued behind another.
 - **Every volume write carries `expected_db`** (the compare-and-set from Q4). The old limit of one
   `volumeStep` per step is gone, so a typed jump of any size is a single write.
 - **Presets, sleep and wake keep the existing preview bar**, unchanged.
@@ -430,7 +439,7 @@ and mute was never driven. Both tables are code constants, not config.
 | **High gain is treated like the unlock** (decision 8) | A plan that switches gain on is "loud" and needs `allow_loud`. Switching it off needs only the normal preview |
 | **A preset that raises the preamp needs the unlock if volume + rise > −10 dB** (decision 12, Q7) | The agent computes `rise = new_preamp − last_written_preamp` and requires `allow_loud` if `volume + rise > −10`. If nothing was ever written, the rise is unknown and counts as loud. A preset that declares no preamp leaves `0x9c` alone (`cmd_apply`), so its largest positive band gain counts as the rise. The last-written value can be wrong if the vendor app changed the preamp since. The preview says the base is "last written by toppingctl" |
 | **"Lower to −30 dB" sends at once** (design rule 5) | An ordinary volume write. It needs no unlock, because the agent reads the device in the same operation and finds the level louder than the target. In step 4 the UI offers it whenever a read shows the room above −10 dB, for example after the knob was turned up. In step 6 it also appears after a loud wake (Q13) |
-| **Undo of a volume change is a volume write** (design rule 5, decision 13) | Each result carries an `undo` token naming the previous level and the level just set. Undo is `POST /v1/volume` to the previous level, with `expected_db` set to the level the change set, debounced in the UI like any other change. An undo above −10 dB needs a live `unlock_id`, as any loud write does, and is refused without one. Preset and gain undo are always previewed |
+| **Undo of a volume change is a volume write** (design rule 5, decision 13) | Each result carries an `undo` token naming the previous level and the level just set. Undo is `POST /v1/volume` to the level read before the burst of writes it reverses (the UI keeps that level, since a burst can be several writes), with `expected_db` set to the level the burst set, debounced in the UI like any other change. An undo that raises the level above −10 dB needs a live `unlock_id` and is refused without one. An undo that lowers the level needs none, even if it lands above −10 dB. Preset and gain undo are always previewed |
 | **Volume writes send without a preview, debounced** (decision 13, superseding decision 11 for volume) | `POST /v1/volume {target_db, expected_db, unlock_id?}`, with no plan. The agent reads the device **in the same operation, just before writing**, and sends only if: (a) `expected_db` equals that fresh read, compared in raw device units, not float dB; otherwise it returns `409` with the fresh state, and the UI shows "Changed elsewhere"; (b) the −10 dB rule passes, checked before and after quantising. Above −10 dB, the target must not be louder than the fresh read, or carry a live `unlock_id`. A jump of any size is allowed; there is no one-`volumeStep` limit. The response reports the level from the read-back. The UI keeps one write in flight per room, and the latest target typed during a write waits behind it. The UI debounces input by 300 ms of quiet, so a burst of taps sends one write. The fresh read stops a "+" from a stale −30 dB jumping 30 dB after the knob went to −60 elsewhere |
 | **Dry-run first** | (1) Every write except volume is two-phase. `POST /v1/plans` builds the frames and returns them, as `--dry-run` does, and only `POST /v1/plans/{id}/send` sends. Unlike today's CLI dry-run, which assumes 0.5 dB per step (`cmd_vol`), a plan reads `volumeStep` from the device, so the frames shown are the frames sent. Volume writes have no plan, so in `mode: dry-run` `POST /v1/volume` returns the frames it would send and sends nothing. (2) A new agent ships with `mode: dry-run`, where **every** sending route, including Send, `POST /v1/volume` and undo, returns the frames and sends nothing. A test covers each route. George switches the office host to `live` after watching one dry-run plan and one dry-run volume write on the front panel (step 4) |
 | **Only absolute targets** (task analysis) | The API has no relative volume. `target_db` is always absolute, so a retried request gives the same result |
@@ -694,8 +703,9 @@ All of these run offline in CI and call the agent API, not the UI:
   operation, and sends a jump of any size when it does. A fake device that "moves the knob"
   between two writes proves the 409.
 - A volume write above −10 dB that is louder than the fresh read is refused without a live
-  `unlock_id`. An `undo` above −10 dB is refused without one, or when the level has changed since
-  the change it undoes.
+  `unlock_id`. An `undo` that raises the level above −10 dB is refused without one, and any `undo`
+  is refused when the level has changed since the change it undoes. A quieter `undo` above −10 dB
+  is accepted without an unlock.
 - Send ignores changes to fields the operation doesn't depend on, such as `sampleRate`.
 - When the CLI holds the lock, the agent answers `423 busy` within its 2 s wait, naming the
   holder.

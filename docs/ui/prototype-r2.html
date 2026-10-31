@@ -174,7 +174,7 @@ function sampleRooms() {
 }
 
 let S;
-function newRoomUi() { return { want: null, flight: null, timer: null, msg: null, undoTo: null, err: "", reading: false }; }
+function newRoomUi() { return { want: null, flight: null, timer: null, msg: null, undoTo: null, burstBase: null, err: "", reading: false }; }
 function reset() {
   if (S) {
     S.rooms.forEach((r) => clearTimeout(r.ui.timer));
@@ -196,6 +196,7 @@ function db(v) {
   return (v < 0 ? MINUS : v > 0 ? "+" : "") + Math.abs(v).toFixed(1) + " dB";
 }
 function say(msg) { $("#live").textContent = msg; }
+const clock = () => new Date().toTimeString().slice(0, 8);
 function plain(html) { const d = document.createElement("div"); d.innerHTML = html; return d.textContent; }
 function presetName(id) { const p = PRESETS.find((x) => x.id === id); return p ? p.name : "Unknown"; }
 
@@ -292,6 +293,7 @@ function request(r, raw) {
   r.ui.undoTo = null;
   r.ui.err = loudError(base, to, S.unlock) || "";
   if (r.ui.err) { refreshVolume(); return; }
+  if (r.ui.flight === null && r.ui.want === null) r.ui.burstBase = base;
   if (to === base && r.ui.flight === null) {
     clearTimeout(r.ui.timer); r.ui.timer = null; r.ui.want = null;
     r.ui.msg = { kind: "none" };
@@ -317,20 +319,20 @@ function flush(r) {
   refreshVolume();
   // Agent side: read the device, check it, write, read back.
   setTimeout(() => {
-    const fresh = r.dev;
+    const fresh = r.dev, readAt = clock();
     if (fresh !== expected) {
-      return settle(r, { kind: "refused", fresh,
+      return settle(r, { kind: "refused", fresh, readAt,
         text: `Changed elsewhere: ${r.name} reads ${db(fresh)}, not the ${db(expected)} this change started from.` });
     }
     const err = loudError(fresh, to, unlocked);
-    if (err) return settle(r, { kind: "refused", fresh, text: err });
+    if (err) return settle(r, { kind: "refused", fresh, readAt, text: err });
     setTimeout(() => {
       if (S.failNext) {
         S.failNext = false;
-        return settle(r, { kind: "failed", fresh, error: "no answer from " + r.host + " within 10 s" });
+        return settle(r, { kind: "failed", fresh, readAt, error: "no answer from " + r.host + " within 10 s" });
       }
       r.dev = to;
-      settle(r, { kind: "set", prev: fresh, v: to });
+      settle(r, { kind: "set", v: to });
     }, 800);
   }, 900);
 }
@@ -340,11 +342,11 @@ function settle(r, res) {
   if (res.kind === "set") {
     r.vol = { v: res.v, src: "read", age: "just now" };
     r.ui.msg = { kind: "set" };
-    r.ui.undoTo = res.prev;
     if (r.ui.want === r.vol.v) r.ui.want = null;                     // queued input already matches the device
     if (r.ui.want !== null) { flush(r); refreshVolume(); return; }   // input that arrived during the write goes next
+    r.ui.undoTo = r.ui.burstBase !== r.vol.v ? r.ui.burstBase : null;
   } else {
-    r.vol = { v: res.fresh, src: "read", age: "just now" };
+    r.vol = { v: res.fresh, src: "read", age: "at " + res.readAt };
     r.ui.msg = res;
     r.ui.want = null;               // input typed against the old value is dropped
     clearTimeout(r.ui.timer); r.ui.timer = null;
@@ -428,7 +430,7 @@ function statusHtml(r) {
     } else if (m.kind === "refused") {
       lines.push(`<div class="st refused">Not sent. ${esc(m.text)}</div>`);
     } else if (m.kind === "failed") {
-      lines.push(`<div class="st failed">Failed: ${esc(m.error)}. ${esc(r.name)} reads ${esc(db(r.vol.v))} (read just now). Check it before trying again.</div>`);
+      lines.push(`<div class="st failed">Failed: ${esc(m.error)}. ${esc(r.name)} reads ${esc(db(r.vol.v))} (read at ${esc(m.readAt)}, before the write). Check it before trying again.</div>`);
     } else if (m.kind === "cancelled") {
       lines.push(`<div class="st">Cancelled. Nothing was sent.</div>`);
     }
@@ -446,7 +448,7 @@ function refreshVolume() {
   const slider = $("#slider");
   if (!slider) return;
   const shown = displayed(r), cap = capOf(r.vol.v), step = r.step.v;
-  slider.max = cap;
+  slider.max = Math.max(cap, shown);
   slider.step = step || 0.5;
   slider.value = shown;
   slider.setAttribute("aria-valuetext", db(shown));
@@ -612,11 +614,11 @@ function typedSet(r) {
   request(r, v);
 }
 
-// Undo goes back through the same debounced path. Going back above -10 dB needs the unlock.
+// Undo goes back through the same debounced path. Raising the level above -10 dB needs the unlock.
 function undoVol(r) {
   const to = r.ui.undoTo;
   if (to === null) return;
-  if (to > SAFE_MAX && !S.unlock) {
+  if (to > SAFE_MAX && to > r.vol.v && !S.unlock) {
     r.ui.err = `Going back to ${db(to)} is louder than ${MINUS}10 dB. Tick “Allow above ${MINUS}10 dB” and undo again.`;
     refreshVolume();
     return;
