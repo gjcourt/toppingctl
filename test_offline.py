@@ -242,6 +242,166 @@ class Dx1iiLiveWriteUsesWireTest(unittest.TestCase):
         self.assertEqual(int.from_bytes(written[8:12], "big"), 0xFFFFFFFF)
 
 
+def _pushed(cmd, value, total=1, cur=1):
+    """One frame as the DX1 II pushes it (report id already stripped)."""
+    head = bytes([0x22, 0x33, 0x20, total, cur, cmd >> 8, cmd & 0xFF])
+    return head + value.to_bytes(4, "big") + bytes([0, 0, 0x66, 0x77])
+
+
+def _pushed_block(values):
+    """The 12-frame 0x810a block, {frame_index: value}, missing frames 0."""
+    return [
+        _pushed(toppingctl.DX1_OUT_STATE, values.get(i, 0), toppingctl.DX1_BLOCK_LEN, i)
+        for i in range(1, toppingctl.DX1_BLOCK_LEN + 1)
+    ]
+
+
+def _make_scripted_hid(writes, script):
+    """A `hid.Device` stand-in that records writes and, after a write to a
+    (reg, sub) in `script`, queues that entry's frames for read()."""
+
+    class _ScriptedHidHandle:
+        def __init__(self, *a, **kw):
+            self.queue = []
+
+        def write(self, data):
+            data = bytes(data)
+            writes.append(data)
+            self.queue += script.get((data[6], data[7]), [])
+            return len(data)
+
+        def read(self, *a, **kw):
+            return self.queue.pop(0) if self.queue else b""
+
+        def close(self):
+            pass
+
+    return _ScriptedHidHandle
+
+
+class Dx1SceneRecallTest(unittest.TestCase):
+    """scenes.py on the DX1 II: 0x7800 = 1..3, behind --unverified and the
+    -10 dB guard (--force), with the before/after state taken from what the
+    device pushes -- never a readNack, which writes on this model."""
+
+    # state word 2 = headphones only; raw 690 = -30.0 dB
+    BASELINE = [
+        _pushed(0x7300, 4),
+        _pushed(0x7500, 0),
+        *_pushed_block({2: 2, 3: 690, 4: 740}),
+    ]
+
+    def setUp(self):
+        import scenes
+
+        self.scenes = scenes
+        for name in ("DX1_CONNECT_PUSH_SECS", "DX1_RECALL_PUSH_SECS"):
+            p = mock.patch.object(scenes, name, 0.05)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def run_scenes(self, *argv):
+        out = io.StringIO()
+        with mock.patch.object(sys, "argv", ["scenes.py", *argv]), contextlib.redirect_stdout(out):
+            try:
+                code = self.scenes.main()
+            except SystemExit as e:
+                code = e.code
+        return code, out.getvalue()
+
+    def no_hardware(self):
+        for name in ("Device", "enumerate"):
+            p = mock.patch.object(toppingctl.hid, name, side_effect=AssertionError("hardware"))
+            p.start()
+            self.addCleanup(p.stop)
+
+    def scripted(self, recall_push):
+        writes = []
+        script = {
+            toppingctl.DX1_REG_CONNECT: self.BASELINE,
+            toppingctl.DX1_REG_SCENE: recall_push,
+        }
+        for name, value in (
+            ("Device", _make_scripted_hid(writes, script)),
+            ("enumerate", _fake_enumerate("DX1II")),
+        ):
+            p = mock.patch.object(toppingctl.hid, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        return writes
+
+    def test_dry_run_prints_connect_and_recall_and_opens_nothing(self):
+        self.no_hardware()
+        code, out = self.run_scenes("--device", "dx1ii", "recall", "c3", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertIn("22 33 20 01 01 11 01 00 00 00 01", out)
+        self.assertIn("22 33 20 01 01 78 00 00 00 00 03", out)
+
+    def test_dx5ii_has_no_c3(self):
+        self.no_hardware()
+        with contextlib.redirect_stderr(io.StringIO()):
+            code, _ = self.run_scenes("recall", "c3", "--dry-run")
+        self.assertEqual(code, 2)
+
+    def test_live_recall_needs_force_before_any_io(self):
+        self.no_hardware()
+        code, _ = self.run_scenes("--device", "dx1ii", "--unverified", "recall", "c1")
+        self.assertIn("--force", str(code))
+
+    def test_live_recall_needs_unverified_before_any_io(self):
+        self.no_hardware()
+        code, _ = self.run_scenes("--device", "dx1ii", "--force", "recall", "c1")
+        self.assertIn("unverified", str(code))
+
+    def test_recall_sends_two_writes_and_warns_when_loud(self):
+        # raw 950 = -4.0 dB on the headphone output after the recall
+        writes = self.scripted(
+            [_pushed(0x7800, 2), _pushed(0x7300, 1), *_pushed_block({2: 2, 3: 950, 4: 740})]
+        )
+        code, out = self.run_scenes("--device", "dx1ii", "--unverified", "--force", "recall", "c2")
+        self.assertEqual(code, 0)
+        self.assertEqual([(w[6], w[7]) for w in writes], [(0x11, 0x01), (0x78, 0x00)])
+        for w in writes:
+            self.assertEqual(w[0], 0x00, "report id byte missing -- _wire() was bypassed")
+            self.assertEqual(w[3], 0x20, "not a writeNack: a readNack writes on this model")
+        self.assertEqual(int.from_bytes(writes[1][8:12], "big"), 2)
+        self.assertIn("device confirmed C2", out)
+        self.assertIn("WARNING: louder than -10 dB after the recall: hpVolume -4.0 dB", out)
+        self.assertIn("vol -30", out)
+        self.assertRegex(out, r"hpVolume\s+-30\.0 dB\s+-> -4\.0 dB")
+        self.assertRegex(out, r"filter\s+4\s+-> 1")
+        self.assertLess(out.index("WARNING"), out.index("field(s) changed"))
+
+    def test_quiet_recall_has_no_warning(self):
+        self.scripted([_pushed(0x7800, 1), *_pushed_block({2: 2, 3: 690, 4: 740})])
+        code, out = self.run_scenes("--device", "dx1ii", "--unverified", "--force", "recall", "c1")
+        self.assertEqual(code, 0)
+        self.assertNotIn("WARNING", out)
+        self.assertIn("nothing changed", out)
+
+    def test_a_disabled_output_at_0_db_does_not_warn(self):
+        # Seen on hardware: a headphones-only scene left optVolume at 0 dB.
+        self.scripted([_pushed(0x7800, 2), *_pushed_block({2: 2, 3: 640, 4: 740, 6: 990})])
+        code, out = self.run_scenes("--device", "dx1ii", "--unverified", "--force", "recall", "c2")
+        self.assertEqual(code, 0)
+        self.assertNotIn("WARNING", out)
+        self.assertRegex(out, r"optVolume\s+-99\.0 dB\s+-> \+0\.0 dB")
+
+    def test_live_outputs_follow_the_state_word(self):
+        live = self.scenes.dx1_live_volume_frames
+        self.assertEqual(set(live(None).values()), set(self.scenes.DX1_VOLUME_FRAMES.values()))
+        self.assertEqual(set(live(2).values()), {"hpVolume", "loHpVolume"})
+        self.assertEqual(set(live(4).values()), {"optVolume"})
+        self.assertEqual(set(live(36).values()), {"optVolume"})
+        self.assertEqual(live(0), {})
+
+    def test_recall_without_confirmation_fails(self):
+        self.scripted([])
+        code, out = self.run_scenes("--device", "dx1ii", "--unverified", "--force", "recall", "c1")
+        self.assertEqual(code, 1)
+        self.assertIn("did not confirm", out)
+
+
 class MuteBitmaskTest(unittest.TestCase):
     """Review #16: frame 7 of the 0x810a block is a bitmask (bit0 = analog
     muted, bit1 = opt muted). The fix replaced a 1/0 on/off write -- which
