@@ -4,6 +4,7 @@
 import time
 
 from toppingctl import (
+    DX1_BLOCK_LEN,
     DX1_OUT_STATE,
     DX1_READ_REGS,
     DX1_REG_PEQ_DUMP,
@@ -52,6 +53,23 @@ def dx1_read_block(h, secs=1.5):
     """readNack the 0x810a output-state block -> {frame_index: value}."""
     h.write(_prefixed(frame(DX1_OUT_STATE >> 8, DX1_OUT_STATE & 0xFF, 0, opcode=0x10)))
     return {b[2]: b[3] for b in _frames(h, secs) if b[0] == 0x810A}
+
+
+def dx1_pushed(h, secs):
+    """What the DX1 II pushes on its own within secs, sending nothing.
+
+    Returns (singles, block): {register: value} for single-frame settings, as
+    0x7800-style 16-bit numbers, and {frame_index: value} for the 0x810a
+    block. A later frame for the same register replaces an earlier one. Used
+    after connectState (the full state push) and after a scene recall (the
+    settings it changed), so the state is read without a readNack."""
+    singles, block = {}, {}
+    for cmd, total, cur, val in _frames(h, secs):
+        if cmd == DX1_OUT_STATE and total == DX1_BLOCK_LEN:
+            block[cur] = val
+        elif total == 1:
+            singles[cmd] = val
+    return singles, block
 
 
 def dx1_query(h, reg, sub, secs=0.7):
