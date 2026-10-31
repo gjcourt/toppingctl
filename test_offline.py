@@ -888,6 +888,17 @@ def _dir_stat(mode, uid, gid):
     return os.stat_result((stat.S_IFDIR | mode, 1, 1, 2, uid, gid, 0, 0, 0, 0))
 
 
+def _readonly_open(real_open):
+    """os.open as seen by a caller who may not write the lock file."""
+
+    def fake(path, flags, *a, **kw):
+        if flags & os.O_RDWR and not flags & os.O_DIRECTORY:
+            raise PermissionError(13, "Permission denied")
+        return real_open(path, flags, *a, **kw)
+
+    return fake
+
+
 class LockHardeningTest(LockTempDirs):
     """A root run truncates and writes device.lock, so the helper must not be
     pointed at another file: no symlinks, no hard links, no file owned by a
@@ -943,11 +954,27 @@ class LockHardeningTest(LockTempDirs):
                 self.assertRefused(f"owned by uid {os.getuid()}")
         self.assertUntouched(path)
 
+    def test_fifo_is_refused_without_hanging(self):
+        """A FIFO at device.lock: the read-only open must not block waiting
+        for a writer, and the regular-file check refuses it."""
+        os.mkfifo(toppingctl.lock_path())
+        self.assertRefused("not a regular file")
+        with mock.patch.object(toppingctl.os, "open", _readonly_open(os.open)):
+            self.assertRefused("not a regular file")
+
+    def test_lock_dir_that_is_a_file_is_refused(self):
+        os.rmdir(self.sysdir)
+        with open(self.sysdir, "w") as fh:
+            fh.write("precious\n")
+        with mock.patch.object(os.path, "isdir", return_value=True):
+            self.assertRefused("not a directory")
+        self.assertUntouched(self.sysdir)
+
     def test_symlinked_lock_dir_is_refused(self):
         real = os.path.join(self.tmp, "real")
         os.rename(self.sysdir, real)
         os.symlink(real, self.sysdir)
-        self.assertRefused("directory is a symbolic link")
+        self.assertRefused("directory is a symbolic link or not a directory")
         self.assertFalse(os.path.exists(os.path.join(real, "device.lock")))
 
     def test_group_writable_lock_dir_is_refused(self):
@@ -1005,11 +1032,11 @@ class LockHardeningTest(LockTempDirs):
         ]
         with mock.patch.object(toppingctl, "LOCK_GROUP", group):
             for st in ok:
-                toppingctl._check_lock_dir(st)
+                toppingctl._check_lock_dir(st, "/d")
             for st in bad:
                 with self.subTest(mode=oct(st.st_mode), uid=st.st_uid, gid=st.st_gid):
                     with self.assertRaises(toppingctl.UnsafeLock):
-                        toppingctl._check_lock_dir(st)
+                        toppingctl._check_lock_dir(st, "/d")
 
 
 class StateDirTest(unittest.TestCase):

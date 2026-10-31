@@ -481,10 +481,11 @@ George is the only user (decision 6), but there are still several writers.
   contends for the same lock. The installer pre-creates the file as `root:toppingd` mode `0644`,
   and the helper opens it **read-only** for `flock` (which Linux allows), so a root run under
   umask 022 can't leave a lock file the agent is unable to use. On the `~/.toppingctl` fallback
-  the helper creates the file if it is missing, mode `0600` in a `0700` directory. The helper never
-follows a symlink at the lock path, and refuses an unsafe lock directory or file (see "Where
-'last written' lives" below). If the lock file can't be opened (for example,
-  `/var/lib/toppingctl` exists but the file was deleted and the caller can't recreate it), the
+  the helper creates the file if it is missing, mode `0600` (and the directory, if missing, `0700`).
+  The helper never follows a symlink at the lock path, and refuses an unsafe lock directory or
+  file (see "Where 'last written' lives" below). Only the installer creates the system lock
+  file: one the agent recreated would be owned by `toppingd`, which a root CLI run refuses. If
+  the lock file can't be opened (for example, `/var/lib/toppingctl` exists but the file was deleted and the caller can't recreate it), the
   CLI refuses to write and says why. Reads warn and continue.
 - **How long each side waits** **(proposal)**. The longest normal holders are:
   - `listen.py`, whose `--secs` defaults to 10 s and which holds the device for that long;
@@ -523,8 +524,9 @@ same directory and refuses a lock directory that is group- or other-writable, wi
 exceptions: a root-owned directory with the sticky bit, and this one. A group-writable lock
 directory is accepted only when it is owned by root **and its group is `toppingd`** (and it is
 not other-writable). A `toppingd` member can create files there, so the helper's checks on the
-opened file are what stop it being turned against a root run: it is opened with `O_NOFOLLOW`,
-and it must be a regular file owned by the caller or root with exactly one link.
+opened file are what stop it being turned against a root run: the directory is opened once and
+used through that fd, the file is opened with `O_NOFOLLOW` and `O_NONBLOCK`, and it must be a
+regular file owned by the caller or root with exactly one link.
 
 ## Repo layout and language
 

@@ -923,15 +923,11 @@ class UnsafeLock(OSError):
         self.strerror = reason
 
 
-def _check_lock_dir(st):
-    """Refuse a lock directory someone else could plant files in: a symlink,
-    or one writable by group or others, unless it is root-owned with the
-    sticky bit, or is the plan's root:toppingd 2775 (group-writable only,
-    for state.json). The fd checks in _open_lock still guard that case."""
-    if stat.S_ISLNK(st.st_mode):
-        raise UnsafeLock("its directory is a symbolic link")
-    if not stat.S_ISDIR(st.st_mode):
-        raise UnsafeLock("its directory is not a directory")
+def _check_lock_dir(st, path):
+    """Refuse a lock directory someone else could plant files in: one
+    writable by group or others, unless it is root-owned with the sticky
+    bit, or is the plan's root:toppingd 2775 (group-writable only, for
+    state.json). The fd checks in _open_lock still guard that case."""
     if not st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         return
     if st.st_uid == 0 and st.st_mode & stat.S_ISVTX:
@@ -942,7 +938,7 @@ def _check_lock_dir(st):
                 return
         except KeyError:
             pass
-    raise UnsafeLock("its directory is writable by group or others (chmod go-w it)")
+    raise UnsafeLock(f"its directory is writable by group or others (chmod go-w {path})")
 
 
 def _check_lock_file(fd):
@@ -962,24 +958,35 @@ def _open_lock(path):
     recorded; read-only otherwise, which flock accepts. The installer's file
     is root:toppingd 0644, so the agent always lands here read-only. Never
     follows a symlink: a root run truncates this file."""
-    lock_dir = os.path.dirname(path)
+    lock_dir, name = os.path.split(path)
     system = path.startswith(LOCK_SYSTEM_DIR + os.sep)
     if not system:
         os.makedirs(lock_dir, mode=0o700, exist_ok=True)
-    _check_lock_dir(os.lstat(lock_dir))
-    flags = os.O_NOFOLLOW | os.O_CLOEXEC
+    # The directory is checked and used through one fd, so it can't be
+    # swapped for a symlink between the check and the open.
     try:
-        try:
-            fd, writable = (
-                os.open(path, os.O_RDWR | os.O_CREAT | flags, 0o644 if system else 0o600),
-                True,
-            )
-        except PermissionError:
-            fd, writable = os.open(path, os.O_RDONLY | flags), False
+        dfd = os.open(lock_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     except OSError as e:
-        if e.errno == errno.ELOOP:
-            raise UnsafeLock("it is a symbolic link") from None
+        if e.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise UnsafeLock("its directory is a symbolic link or not a directory") from None
         raise
+    try:
+        _check_lock_dir(os.fstat(dfd), lock_dir)
+        # O_NONBLOCK: a FIFO planted here must fail the regular-file check,
+        # not hang the read-only open.
+        flags = os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+        mode = 0o644 if system else 0o600
+        try:
+            try:
+                fd, writable = os.open(name, os.O_RDWR | os.O_CREAT | flags, mode, dir_fd=dfd), True
+            except PermissionError:
+                fd, writable = os.open(name, os.O_RDONLY | flags, dir_fd=dfd), False
+        except OSError as e:
+            if e.errno == errno.ELOOP:
+                raise UnsafeLock("it is a symbolic link") from None
+            raise
+    finally:
+        os.close(dfd)
     try:
         _check_lock_file(fd)
     except BaseException:
