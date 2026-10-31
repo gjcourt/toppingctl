@@ -1,0 +1,725 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>toppingctl rooms — prototype r2 (sample data)</title>
+<!--
+  Prototype r2 for TOPPINGCTL-10. A single self-contained file: no network
+  requests, nothing talks to a DAC. Every room, host and value is invented.
+  r1 (prototype-r1.html) is kept unchanged.
+
+  Volume changes send without a preview: the UI shows the target at once, sends
+  the latest target after 300 ms of quiet, keeps one write in flight per room,
+  and the (simulated) agent re-reads the device before each write. The -10 dB
+  unlock is a checkbox that lasts 60 s and covers one Send. Presets and power
+  keep the preview bar.
+-->
+<style>
+  :root {
+    --bg: #f6f6f4; --card: #ffffff; --ink: #1c1c1a; --muted: #5d5d58; --line: #d9d9d4;
+    --accent: #2457c5; --accent-ink: #ffffff;
+    --warn: #8a5300; --warn-bg: #fff3dc; --bad: #b3261e; --bad-bg: #fde9e7;
+    --ok: #1e6b3a; --off-bg: #ececea;
+    --radius: 12px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141413; --card: #1f1f1d; --ink: #ececea; --muted: #a8a8a2; --line: #3a3a37;
+      --accent: #8fb0ff; --accent-ink: #0d1a33;
+      --warn: #ffc86b; --warn-bg: #3a2b0f; --bad: #ff9c94; --bad-bg: #3d1916;
+      --ok: #7fd49a; --off-bg: #2a2a28;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 520px; margin: 0 auto; padding: 0 14px 40px; }
+  .num { font-variant-numeric: tabular-nums; }
+  .sample {
+    position: sticky; top: 0; z-index: 5; background: var(--warn-bg); color: var(--warn);
+    border-bottom: 1px solid var(--line); padding: 6px 14px; font-size: 13px; text-align: center;
+  }
+  header { display: flex; align-items: center; gap: 10px; padding: 14px 0 8px; }
+  header h1 { font-size: 22px; margin: 0; flex: 1; }
+  .who { font-size: 13px; color: var(--muted); text-align: right; }
+  button, .btn {
+    font: inherit; border-radius: 10px; border: 1px solid var(--line); background: var(--card);
+    color: var(--ink); padding: 10px 14px; min-height: 44px; cursor: pointer;
+  }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  button:disabled, button[aria-disabled=true] { opacity: .45; cursor: not-allowed; }
+  :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  .link { background: none; border: none; color: var(--accent); padding: 10px 4px; min-height: 44px; text-decoration: underline; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 14px; margin: 10px 0;
+  }
+  a.card { display: block; color: inherit; text-decoration: none; }
+  .row { display: flex; align-items: baseline; gap: 8px; }
+  .row .grow { flex: 1; }
+  .title { font-weight: 650; font-size: 18px; }
+  .sub { color: var(--muted); font-size: 14px; }
+  .big { font-size: 30px; font-weight: 650; }
+  .pill { font-size: 13px; padding: 2px 8px; border-radius: 999px; border: 1px solid currentColor; white-space: nowrap; }
+  .pill.ok { color: var(--ok); }
+  .pill.bad { color: var(--bad); }
+  .pill.view { color: var(--muted); }
+  .stale .val { color: var(--muted); }
+  .prov { font-size: 13px; color: var(--muted); }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: 0; }
+  .dot.read { background: var(--ok); }
+  .dot.written { border: 2px solid var(--muted); }
+  .dot.unknown { width: 10px; height: 2px; border-radius: 0; background: var(--muted); vertical-align: 3px; }
+  .banner { border-radius: 10px; padding: 10px 12px; margin: 10px 0; font-size: 14px; }
+  .banner.bad { background: var(--bad-bg); color: var(--bad); }
+  .banner.warn { background: var(--warn-bg); color: var(--warn); }
+  .banner.info { background: var(--off-bg); color: var(--ink); }
+  h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 22px 0 6px; }
+  .stepper { display: grid; grid-template-columns: 64px 1fr 64px; gap: 10px; align-items: center; margin-top: 10px; }
+  .stepper button { font-size: 22px; padding: 0; height: 56px; }
+  input[type=range] { width: 100%; accent-color: var(--accent); height: 44px; }
+  .scale { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); }
+  .why { font-size: 13px; color: var(--muted); margin-top: 6px; }
+  label.check { display: flex; gap: 10px; align-items: center; min-height: 44px; }
+  label.check input { width: 22px; height: 22px; }
+  .target { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+  .target .neg { font-size: 20px; font-weight: 600; margin-right: -4px; }
+  .target input { font: inherit; width: 90px; padding: 9px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--ink); }
+  .err { color: var(--bad); font-size: 14px; margin-top: 6px; }
+  .st { font-size: 15px; margin-top: 8px; }
+  .st.sending { color: var(--accent); }
+  .st.waiting { color: var(--warn); }
+  .st.set { color: var(--ok); }
+  .st.refused, .st.failed { color: var(--bad); }
+  .preset { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; min-height: 44px; }
+  .preset input { margin-top: 4px; width: 20px; height: 20px; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 8px; }
+  .pending {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 6; background: var(--card);
+    border-top: 2px solid var(--accent); box-shadow: 0 -6px 20px rgb(0 0 0 / .15);
+  }
+  .pending .in { max-width: 520px; margin: 0 auto; padding: 12px 14px 16px; max-height: 70vh; overflow-y: auto; }
+  .pending .tag { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--accent); }
+  .pending .what { font-size: 18px; font-weight: 600; margin: 4px 0; }
+  .pending .acts { display: grid; grid-template-columns: 1fr 2fr; gap: 10px; margin-top: 10px; }
+  details { font-size: 13px; color: var(--muted); }
+  pre { white-space: pre-wrap; font: 12px/1.5 ui-monospace, Menlo, monospace; margin: 6px 0 0; }
+  .proto { margin-top: 36px; border: 1px dashed var(--line); border-radius: var(--radius); padding: 12px; font-size: 14px; color: var(--muted); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="sample" role="note">Prototype r2 · <strong>sample data</strong>. Rooms, hosts and values are invented. Nothing here talks to a DAC.</div>
+<div class="wrap">
+  <main id="app"></main>
+  <div id="pending" class="pending" hidden></div>
+  <div id="proto"></div>
+  <div id="live" aria-live="polite" style="position:absolute;left:-9999px"></div>
+</div>
+
+<script>
+"use strict";
+const MINUS = "−";
+const SAFE_MAX = -10;      // AGENTS.md: above -10 dB needs an explicit force
+const VOL_MIN = -99;
+const DEBOUNCE_MS = 300;   // quiet time before the latest volume target is sent
+const UNLOCK_S = 60;       // the "Allow above −10 dB" checkbox times out
+const LOUD_MSG = "Above " + MINUS + "10 dB needs “Allow above " + MINUS + "10 dB” first.";
+
+// Real preset files from presets/ (names from presets/README.md). Which one a
+// room "has" is invented sample data.
+const PRESETS = [
+  { id: "flat", name: "Flat: no correction", detail: "All bands off. The preamp is left as it is", pre: null },
+  { id: "e3-oratory-harman-oe", name: "Dan Clark Audio E3 · Harman OE", detail: "10 filters, preamp " + MINUS + "1.1 dB", pre: -1.1 },
+  { id: "sundara-post2020pads-oratory-harman-oe", name: "HiFiMan Sundara · Harman OE", detail: "10 filters, preamp " + MINUS + "6.7 dB", pre: -6.7 },
+  { id: "zero-red-crinacle-harman-ie", name: "Truthear Zero:RED · Harman IE", detail: "10 filters, preamp " + MINUS + "3.3 dB", pre: -3.3 },
+];
+
+const VIEW_ONLY = "View only: this model isn't confirmed for toppingctl.";
+
+// `dev` is what the simulated device holds. The UI never reads it directly:
+// it learns the value only through a read, as the agent does.
+function sampleRooms() {
+  return [
+    { id: "office", name: "Office", model: "Topping DX5 II", host: "office-audio", status: "confirmed", reach: "ok",
+      dev: -32,
+      vol: { v: -32, src: "read", age: "12 s ago" }, step: { v: 0.5, src: "read" },
+      output: { v: "Headphones, balanced", hp: true },
+      power: { v: "Awake", src: "read", age: "12 s ago" },
+      preset: { v: "e3-oratory-harman-oe", src: "written", age: "2 h ago" },
+      preamp: { v: -1.1, src: "written", age: "2 h ago" } },
+    { id: "living", name: "Living room", model: "Topping DX5 II", host: "living-audio", status: "confirmed", reach: "ok",
+      dev: -26.5,
+      vol: { v: -24, src: "written", age: "3 days ago" }, step: { v: null, src: "unknown" },
+      output: { v: "Line out, balanced", hp: false },
+      power: { v: null, src: "unknown" },
+      preset: { v: null, src: "unknown" }, preamp: { v: null, src: "unknown" } },
+    { id: "bedroom", name: "Bedroom", model: "Topping DX1 II", host: "bedroom-audio", status: "unverified", reach: "ok",
+      dev: -40,
+      vol: { v: -40, src: "read", age: "8 s ago" }, step: { v: null, src: "unknown" },
+      output: { v: "Headphones", hp: true },
+      power: { v: null, src: "unknown" },
+      preset: { v: null, src: "unknown" }, preamp: { v: null, src: "unknown" } },
+    { id: "studio", name: "Studio", model: "Topping DX5 II", host: "studio-audio", status: "confirmed", reach: "down",
+      lastSeen: "3 h ago, at 14:02", dev: -35,
+      vol: { v: -35, src: "read", age: "3 h ago" }, step: { v: 0.5, src: "read" },
+      output: { v: "Line out, single-ended", hp: false },
+      power: { v: null, src: "unknown" },
+      preset: { v: "flat", src: "written", age: "5 days ago" }, preamp: { v: null, src: "unknown" } },
+  ];
+}
+
+let S;
+function newRoomUi() { return { want: null, flight: null, timer: null, msg: null, undoTo: null, err: "", reading: false }; }
+function reset() {
+  if (S) {
+    S.rooms.forEach((r) => clearTimeout(r.ui.timer));
+    clearInterval(S.unlockTimer);
+  }
+  S = { view: "signin", room: null, rooms: sampleRooms(), pending: null, sending: false,
+        unlock: false, unlockLeft: 0, unlockTimer: null, unlockNote: "",
+        failNext: false, typed: "", typedErr: "", framesOpen: false, said: null, toast: null };
+  S.rooms.forEach((r) => { r.ui = newRoomUi(); });
+}
+reset();
+
+const $ = (s) => document.querySelector(s);
+const esc = (s) => (s === null || s === undefined ? "Unknown" : String(s)).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const room = () => S.rooms.find((r) => r.id === S.room);
+const writable = (r) => r.status === "confirmed" && r.reach === "ok";
+function db(v) {
+  if (v === null || v === undefined) return "Unknown";
+  return (v < 0 ? MINUS : v > 0 ? "+" : "") + Math.abs(v).toFixed(1) + " dB";
+}
+function say(msg) { $("#live").textContent = msg; }
+function plain(html) { const d = document.createElement("div"); d.innerHTML = html; return d.textContent; }
+function presetName(id) { const p = PRESETS.find((x) => x.id === id); return p ? p.name : "Unknown"; }
+
+function prov(f, r) {
+  const last = r && r.reach === "down" ? " · last known" : "";
+  if (f.src === "read") return `<span class="prov"><span class="dot read"></span>Read from device · ${esc(f.age)}${last}</span>`;
+  if (f.src === "written") return `<span class="prov"><span class="dot written"></span>Last written by toppingctl · ${esc(f.age)} · may be stale${last}</span>`;
+  return `<span class="prov"><span class="dot unknown"></span>Unknown · not read yet</span>`;
+}
+
+function reachPill(r) {
+  if (r.reach === "down") return `<span class="pill bad">Unreachable</span>`;
+  return `<span class="pill ok">Reachable</span>`;
+}
+
+// --- views -----------------------------------------------------------------
+
+function viewSignin() {
+  return `
+  <header><h1>toppingctl</h1></header>
+  <div class="card">
+    <div class="title">Sign in</div>
+    <p class="sub">Placeholder. The sign-in method is decided in the architecture plan (Authelia OIDC).</p>
+    <button class="primary" style="width:100%" data-act="signin">Continue as george (sample)</button>
+  </div>`;
+}
+
+function viewList() {
+  const cards = S.rooms.map((r) => {
+    const down = r.reach === "down";
+    const pre = r.preset.v ? presetName(r.preset.v) + " (last written)" : "EQ preset unknown";
+    return `
+    <a class="card ${down ? "stale" : ""}" href="#${r.id}" data-act="open" data-id="${r.id}">
+      <div class="row"><span class="title grow">${esc(r.name)}</span>
+        ${r.status !== "confirmed" ? `<span class="pill view">View only</span>` : ""} ${reachPill(r)}</div>
+      <div class="sub">${esc(r.model)} · ${esc(r.host)}</div>
+      ${down ? `<div class="err">No answer from ${esc(r.host)} since ${esc(r.lastSeen)}.</div>` : ""}
+      <div class="row" style="margin-top:8px"><span class="big num val">${esc(db(r.vol.v))}</span></div>
+      <div>${prov(r.vol, r)}</div>
+      <div class="sub val" style="margin-top:6px">${esc(r.output.v || "Output unknown")} · ${esc(pre)}</div>
+    </a>`;
+  }).join("");
+  return `
+  <header><h1>Rooms</h1><div class="who">george (sample)<br>via LAN (sample) · <button class="link" data-act="signout">Sign out</button></div></header>
+  ${cards}`;
+}
+
+function viewRoom() {
+  const r = room();
+  const w = writable(r);
+  let banner = "";
+  if (r.reach === "down") {
+    banner = `<div class="banner bad" role="status"><strong>Unreachable.</strong> ${esc(r.host)} hasn't answered since ${esc(r.lastSeen)}.
+      The values below are the last known ones, and nothing can be changed until it answers.</div>`;
+  } else if (r.status !== "confirmed") {
+    banner = `<div class="banner info"><strong>View only.</strong> The ${esc(r.model)} isn't confirmed for toppingctl, so this page can't change anything on it.</div>`;
+  }
+  return `
+  <header><button data-act="back" aria-label="Back to rooms" ${S.sending ? "disabled" : ""}>‹ Rooms</button>
+    <div style="flex:1"><h1>${esc(r.name)}</h1><div class="sub">${esc(r.model)} · ${esc(r.host)}</div></div>${reachPill(r)}</header>
+  ${banner}
+  ${S.toast && S.toast.room === r.id ? `<div class="banner ${S.toast.kind}" id="toast">${S.toast.html}</div>` : ""}
+  <h2>Volume</h2>
+  <div class="card ${r.reach === "down" ? "stale" : ""}" id="volcard">${volumeCard(r, w)}</div>
+  <h2>Power</h2>
+  <div class="card">${powerBlock(r, w)}</div>
+  <h2>EQ preset</h2>
+  <div class="card">${presetBlock(r, w)}</div>`;
+}
+
+// --- volume: send without a preview, debounced ------------------------------
+// The target a room is heading for is r.ui.want (waiting for input to settle)
+// or r.ui.flight (being sent). Only one write is in flight per room. The value
+// on screen as the device's is r.vol, and only a read changes it.
+
+function stepOf(r) { return r.step.v || 0.5; }      // 0.5 is only for rounding; steps stay disabled until read
+function roundTo(r, to) { const s = stepOf(r); return Math.round(to / s) * s; }
+function displayed(r) { return r.ui.want ?? r.ui.flight ?? r.vol.v; }
+// Above -10 dB needs the unlock, unless the target is quieter than the level the
+// device last reported. `base` is the device's level as known at that point.
+function loudError(base, to, unlocked) {
+  if (to < VOL_MIN) return "The quietest setting is " + MINUS + "99.0 dB.";
+  if (to > SAFE_MAX && to > (base ?? SAFE_MAX) && !unlocked) return LOUD_MSG;
+  return null;
+}
+function capOf(base) {
+  if (S.unlock) return 0;
+  return base !== null && base > SAFE_MAX ? base : SAFE_MAX;
+}
+
+function request(r, raw) {
+  const base = r.vol.v;
+  const to = roundTo(r, raw);
+  r.ui.undoTo = null;
+  r.ui.err = loudError(base, to, S.unlock) || "";
+  if (r.ui.err) { refreshVolume(); return; }
+  if (to === base && r.ui.flight === null) {
+    clearTimeout(r.ui.timer); r.ui.timer = null; r.ui.want = null;
+    r.ui.msg = { kind: "none" };
+  } else {
+    r.ui.want = to;
+    r.ui.msg = { kind: "waiting" };
+    if (r.ui.flight === null) {
+      clearTimeout(r.ui.timer);
+      r.ui.timer = setTimeout(() => flush(r), DEBOUNCE_MS);
+    }
+  }
+  refreshVolume();
+}
+
+function flush(r) {
+  r.ui.timer = null;
+  if (r.ui.flight !== null || r.ui.want === null) return;
+  const to = r.ui.want, expected = r.vol.v, unlocked = S.unlock;
+  r.ui.want = null;
+  r.ui.flight = to;
+  r.ui.msg = { kind: "sending" };
+  if (unlocked) relock();          // one Send uses the unlock, whatever it sends
+  refreshVolume();
+  // Agent side: read the device, check it, write, read back.
+  setTimeout(() => {
+    const fresh = r.dev;
+    if (fresh !== expected) {
+      return settle(r, { kind: "refused", fresh,
+        text: `Changed elsewhere: ${r.name} reads ${db(fresh)}, not the ${db(expected)} this change started from.` });
+    }
+    const err = loudError(fresh, to, unlocked);
+    if (err) return settle(r, { kind: "refused", fresh, text: err });
+    setTimeout(() => {
+      if (S.failNext) {
+        S.failNext = false;
+        return settle(r, { kind: "failed", fresh, error: "no answer from " + r.host + " within 10 s" });
+      }
+      r.dev = to;
+      settle(r, { kind: "set", prev: fresh, v: to });
+    }, 800);
+  }, 900);
+}
+
+function settle(r, res) {
+  r.ui.flight = null;
+  if (res.kind === "set") {
+    r.vol = { v: res.v, src: "read", age: "just now" };
+    r.ui.msg = { kind: "set" };
+    r.ui.undoTo = res.prev;
+    if (r.ui.want === r.vol.v) r.ui.want = null;                     // queued input already matches the device
+    if (r.ui.want !== null) { flush(r); refreshVolume(); return; }   // input that arrived during the write goes next
+  } else {
+    r.vol = { v: res.fresh, src: "read", age: "just now" };
+    r.ui.msg = res;
+    r.ui.want = null;               // input typed against the old value is dropped
+    clearTimeout(r.ui.timer); r.ui.timer = null;
+  }
+  refreshVolume();
+}
+
+function cancelVol(r) {
+  if (r.ui.want === null) return;
+  clearTimeout(r.ui.timer); r.ui.timer = null; r.ui.want = null;
+  r.ui.msg = { kind: "cancelled" };
+  relock();
+  refreshVolume();
+}
+
+function setUnlock(on) {
+  if (!on) { relock(); return; }
+  S.unlock = true; S.unlockLeft = UNLOCK_S; S.unlockNote = "";
+  clearInterval(S.unlockTimer);
+  S.unlockTimer = setInterval(() => {
+    S.unlockLeft -= 1;
+    if (S.unlockLeft <= 0) { relock(); S.unlockNote = `The unlock ran out after ${UNLOCK_S} s.`; }
+    refreshVolume();
+  }, 1000);
+}
+function relock() {
+  S.unlock = false; S.unlockNote = "";
+  clearInterval(S.unlockTimer); S.unlockTimer = null;
+}
+
+function volumeCard(r, w) {
+  let html = `<div class="big num" id="vol-now">${esc(db(r.vol.v))}</div>
+    <div id="vol-prov">${prov(r.vol, r)}</div>`;
+  if (!w) {
+    const why = r.reach === "down" ? "Can't change: the host isn't answering." : VIEW_ONLY;
+    return html + `<div class="stepper">
+      <button disabled aria-label="${esc(r.name)}: quieter">${MINUS}</button>
+      <input type="range" disabled aria-label="${esc(r.name)} volume" min="${VOL_MIN}" max="0" value="${r.vol.v ?? VOL_MIN}">
+      <button disabled aria-label="${esc(r.name)}: louder">+</button>
+    </div><div class="why">${why}</div>`;
+  }
+  html += `<div style="margin-top:8px"><button data-act="read" ${r.reading || r.ui.flight !== null ? "disabled" : ""}>${r.reading ? "Reading " + esc(r.host) + "…" : "Read " + esc(r.name) + " now"}</button></div>`;
+  if (r.vol.v === null) {
+    return html + `<div class="why">The level isn't known yet. Read the device before changing it.</div>`;
+  }
+  const step = r.step.v;
+  return html + `
+    <div class="stepper">
+      <button id="vol-down" data-act="step" data-dir="-1" aria-label="${esc(r.name)}: quieter by ${step ?? "?"} dB">${MINUS}</button>
+      <div>
+        <input type="range" id="slider" min="${VOL_MIN}" aria-label="${esc(r.name)} volume">
+        <div class="scale num"><span>${MINUS}99 dB</span><span id="vol-cap"></span></div>
+      </div>
+      <button id="vol-up" data-act="step" data-dir="1" aria-label="${esc(r.name)}: louder by ${step ?? "?"} dB">+</button>
+    </div>
+    <div class="why" id="vol-step-note"></div>
+    <div class="target"><label for="tgt">Set to</label>
+      <span class="neg num" aria-hidden="true">${MINUS}</span>
+      <input id="tgt" type="text" class="num" inputmode="decimal" autocomplete="off" placeholder="30" aria-describedby="tgt-hint tgt-err" value="${esc(S.typed)}">
+      <span>dB</span><button data-act="typed">Set</button></div>
+    <div id="tgt-hint" class="why">Levels are below 0 dB, so type how far below: 32 means ${MINUS}32.0 dB.
+      <span id="tgt-echo" class="num">${esc(echoTarget(S.typed))}</span></div>
+    <div id="tgt-err" class="err">${esc(S.typedErr)}</div>
+    <div id="vol-status" aria-live="polite"></div>
+    <label class="check"><input type="checkbox" id="unlock" ${S.unlock ? "checked" : ""}>
+      <span>Allow above ${MINUS}10 dB for one Send${r.output.hp ? " <strong>(output is headphones)</strong>" : ""}</span></label>
+    <div id="unlock-note" class="why"></div>`;
+}
+
+function statusHtml(r) {
+  const u = r.ui, m = u.msg || {};
+  const lines = [];
+  if (u.flight !== null) lines.push(`<div class="st sending">Sending ${esc(db(u.flight))} to ${esc(r.host)}… not set yet.</div>`);
+  if (u.want !== null) {
+    lines.push(`<div class="st waiting">${u.flight !== null ? "Queued behind that write" : "Waiting for you to stop"}: ${esc(db(u.want))}. Not sent yet. <button class="link" data-act="cancelvol">Cancel</button></div>`);
+  }
+  if (u.flight === null && u.want === null) {
+    if (m.kind === "set") {
+      lines.push(`<div class="st set">Set to ${esc(db(r.vol.v))}, read back from the device.` +
+        (u.undoTo !== null ? ` <button class="link" data-act="undo">Undo (back to ${esc(db(u.undoTo))})</button>` : "") + `</div>`);
+    } else if (m.kind === "refused") {
+      lines.push(`<div class="st refused">Not sent. ${esc(m.text)}</div>`);
+    } else if (m.kind === "failed") {
+      lines.push(`<div class="st failed">Failed: ${esc(m.error)}. ${esc(r.name)} reads ${esc(db(r.vol.v))} (read just now). Check it before trying again.</div>`);
+    } else if (m.kind === "cancelled") {
+      lines.push(`<div class="st">Cancelled. Nothing was sent.</div>`);
+    }
+  }
+  if (u.err) lines.push(`<div class="err">${esc(u.err)}</div>`);
+  return lines.join("");
+}
+
+// Updates the volume card in place, so a slider drag isn't interrupted by a re-render.
+function refreshVolume() {
+  const r = room();
+  if (!r || S.view !== "room" || !$("#vol-now")) return;
+  $("#vol-now").textContent = db(r.vol.v);
+  $("#vol-prov").innerHTML = prov(r.vol, r);
+  const slider = $("#slider");
+  if (!slider) return;
+  const shown = displayed(r), cap = capOf(r.vol.v), step = r.step.v;
+  slider.max = cap;
+  slider.step = step || 0.5;
+  slider.value = shown;
+  slider.setAttribute("aria-valuetext", db(shown));
+  $("#vol-cap").textContent = S.unlock ? "unlocked for one Send" : cap > SAFE_MAX ? `now ${db(cap)}, quieter only` : `${MINUS}10 dB limit`;
+  $("#vol-down").disabled = step === null || shown - step < VOL_MIN;
+  $("#vol-up").disabled = step === null || shown + step > cap;
+  $("#vol-step-note").textContent = step === null
+    ? "The step size hasn't been read yet. Read the device to enable + and −."
+    : `Steps of ${step} dB, from the device's volumeStep. The step is read again before each write.`;
+  $("#vol-status").innerHTML = statusHtml(r);
+  $("#unlock").checked = S.unlock;
+  $("#unlock-note").textContent = S.unlock
+    ? `Unlocked for one Send. It locks again after the next Send or Cancel, or in ${S.unlockLeft} s.`
+    : S.unlockNote;
+  $("#tgt-err").textContent = S.typedErr;
+}
+
+// "Set to" takes a magnitude: every level is at or below 0 dB, and the iPhone
+// decimal keypad has no minus key. "32" means -32 dB. An explicit minus (ASCII,
+// U+2212 or an en dash) is accepted, a trailing "dB" is ignored, and a comma
+// works as the decimal point. 0 stays 0 dB. Returns a number, or an error string.
+function parseTarget(text) {
+  let t = text.trim().replace(/\s*db$/i, "").replace(",", ".");
+  if (t === "") return "Type a level, such as 30 for " + MINUS + "30 dB.";
+  if (t.startsWith("+")) return "Levels are below 0 dB. Type 30 for " + MINUS + "30 dB.";
+  t = t.replace(/^[-−–]\s*/, "");
+  if (!/^\d+(\.\d*)?$|^\.\d+$/.test(t)) return "Type a level, such as 30 for " + MINUS + "30 dB.";
+  const mag = Number(t);
+  return mag === 0 ? 0 : -mag;
+}
+
+function echoTarget(text) {
+  if (!text || !text.trim()) return "";
+  const v = parseTarget(text);
+  return typeof v === "number" ? "Reads as " + db(v) + "." : "";
+}
+
+function powerBlock(r, w) {
+  const p = r.power;
+  let html = `<div class="row"><span class="grow">${esc(p.v ?? "Unknown")}</span></div><div>${prov(p, r)}</div>
+    <div class="why">What the DAC reports while asleep hasn't been measured yet (architecture plan, step 2). Until it has, this shows what toppingctl last wrote.</div>`;
+  if (!w) return html + `<div class="why">${r.reach === "down" ? "Can't change: the host isn't answering." : VIEW_ONLY}</div>`;
+  const awake = p.v !== "Asleep";
+  return html + `<div class="pair">
+      <button data-act="power" data-to="sleep" ${awake ? "" : "disabled"}>Sleep ${esc(r.name)}</button>
+      <button data-act="power" data-to="wake" ${awake ? "disabled" : ""}>Wake ${esc(r.name)}</button></div>
+    <div class="why">Sleep and wake show a preview before anything is sent.</div>`;
+}
+
+function stagePower(sleep) {
+  const r = room();
+  S.pending = { kind: "power", to: sleep ? "sleep" : "wake",
+    what: sleep ? `Put ${r.name} to sleep` : `Wake ${r.name}`,
+    frames: `power register 71 01 = ${sleep ? 0 : 1} (${sleep ? "sleep" : "wake"}), with the checksum the device requires\n` +
+      `commit 71 34` };
+}
+
+function presetBlock(r, w) {
+  const cur = r.preset.v;
+  let html = `<div>${cur ? "Current: <strong>" + esc(presetName(cur)) + "</strong>" : "Current: <strong>Unknown</strong>"}</div>
+    <div>${prov(r.preset, r)}</div>
+    <div class="row" style="margin-top:6px"><span class="sub">Preamp</span><span class="num">${esc(db(r.preamp.v))}</span></div>
+    <div>${prov(r.preamp, r)}</div>
+    <div class="why">The DAC doesn't store preset names, so this is what toppingctl last wrote. Anything changed since on the front panel or in the vendor app won't show here.</div>`;
+  if (!w) return html + `<div class="why">${r.reach === "down" ? "Can't change: the host isn't answering." : VIEW_ONLY}</div>`;
+  html += `<fieldset style="border:none;padding:0;margin:8px 0 0"><legend class="sub">Apply a preset (shows a preview first)</legend>` +
+    PRESETS.map((p) => {
+      const sel = S.pending && S.pending.kind === "preset" ? S.pending.to === p.id : false;
+      return `<label class="preset"><input type="radio" name="preset" value="${p.id}" ${sel ? "checked" : ""}>
+        <span><span>${esc(p.name)}</span>${p.id === cur ? " <span class='pill view'>last written · re-apply</span>" : ""}<br><span class="sub">${esc(p.detail)}</span></span></label>`;
+    }).join("") + `</fieldset>`;
+  return html;
+}
+
+function stagePreset(id) {
+  const r = room();
+  const to = PRESETS.find((p) => p.id === id);
+  const cur = r.preamp.v;
+  let note = "";
+  if (to.pre === null) {
+    note = `Flat turns every band off and leaves the preamp where it is (${db(cur)}). Frequencies the current preset was cutting get louder.`;
+  } else if (cur === null) {
+    note = "The current preamp is unknown, so the overall level change is unknown.";
+  } else if (to.pre > cur) {
+    note = `Preamp rises from ${db(cur)} to ${db(to.pre)}: the overall level goes up ${(to.pre - cur).toFixed(1)} dB, before the filters shape individual frequencies.`;
+  }
+  S.pending = { kind: "preset", from: r.preset.v, to: id, note,
+    what: `${id === r.preset.v ? "Re-apply" : "Apply"} “${presetName(id)}” to ${r.name}`,
+    frames: (to.pre === null ? "" : "4 preamp frames (9c 01-04), then ") +
+      "110 band frames (11 registers × 10; the inert 11th is cleared too), then commit." +
+      (to.pre === null ? " No preamp frames." : "") +
+      " The production build lists every frame, as toppingctl --dry-run does; this prototype only counts them." };
+}
+
+function clearPending() { S.pending = null; S.said = null; }
+
+function renderPending() {
+  const el = $("#pending");
+  const p = S.pending;
+  if (!p || S.view !== "room") { el.hidden = true; el.innerHTML = ""; S.said = null; return; }
+  const r = room();
+  el.hidden = false;
+  el.innerHTML = `<div class="in" role="region" aria-label="Pending change">
+    <div class="tag">${S.sending ? "Sending…" : "Preview · nothing sent yet"}</div>
+    <div class="what num">${esc(p.what)}</div>
+    ${p.note ? `<div class="banner warn">${esc(p.note)}</div>` : ""}
+    <details id="frames" ${S.framesOpen ? "open" : ""}><summary>Frames to send</summary><pre>${esc(p.frames)}</pre></details>
+    <div class="acts"><button data-act="cancel" ${S.sending ? "disabled" : ""}>Cancel</button>
+      <button class="primary" data-act="send" ${S.sending ? "disabled" : ""}>${S.sending ? "Sending to " + esc(r.host) + "…" : "Send to " + esc(r.name)}</button></div>
+  </div>`;
+  if (S.said !== p.what) { S.said = p.what; say("Preview: " + p.what + ". Nothing sent yet. Send and Cancel are after the page."); }
+}
+
+// The bar is fixed, so keep room for it under the page, whatever its height.
+function padForBar() {
+  const el = $("#pending");
+  $(".wrap").style.paddingBottom = el.hidden ? "" : el.offsetHeight + 24 + "px";
+}
+if (window.ResizeObserver) new ResizeObserver(padForBar).observe($("#pending"));
+
+// Presets and power: the preview bar's Send. Volume never goes through here.
+function sendPending() {
+  const r = room(), p = S.pending;
+  if (!writable(r)) { clearPending(); render(); return; }
+  S.sending = true; render();
+  setTimeout(() => {
+    S.sending = false;
+    if (S.failNext) {
+      S.failNext = false;
+      S.toast = { room: r.id, kind: "bad", html: `<strong>Couldn't reach ${esc(r.host)}.</strong> Nothing was changed. Your change is still waiting below; try sending it again.` };
+      render(`[data-act="send"]`); say(plain(S.toast.html)); return;
+    }
+    S.pending = null; S.said = null;
+    if (p.kind === "preset") {
+      const to = PRESETS.find((x) => x.id === p.to);
+      r.preset = { v: p.to, src: "written", age: "just now" };
+      if (to.pre !== null) r.preamp = { v: to.pre, src: "written", age: "just now" };
+      S.toast = { room: r.id, kind: "info", html: `Applied “${esc(presetName(p.to))}” to ${esc(r.name)}.` +
+        (p.from && p.from !== p.to ? ` <button class="link" data-act="undopreset" data-to="${p.from}">Undo (back to ${esc(presetName(p.from))})</button>` : "") };
+    } else {
+      const asleep = p.to === "sleep";
+      r.power = { v: asleep ? "Asleep" : "Awake", src: "written", age: "just now" };
+      S.toast = { room: r.id, kind: "info", html: `${esc(r.name)} is ${asleep ? "asleep" : "awake"}. ` +
+        `<button class="link" data-act="undopower" data-to="${asleep ? "wake" : "sleep"}">Undo (preview: ${asleep ? "wake" : "sleep"})</button>` };
+    }
+    render(); say(plain(S.toast.html));
+  }, 800);
+}
+
+function readVol(r) {
+  r.reading = true; render();
+  setTimeout(() => {
+    r.reading = false;
+    r.vol = { v: r.dev, src: "read", age: "just now" };
+    r.step = { v: 0.5, src: "read" };
+    render();
+  }, 900);
+}
+
+function typedSet(r) {
+  const v = parseTarget(S.typed);
+  if (typeof v === "string") { S.typedErr = v; refreshVolume(); return; }
+  S.typedErr = "";
+  request(r, v);
+}
+
+// Undo goes back through the same debounced path. Going back above -10 dB needs the unlock.
+function undoVol(r) {
+  const to = r.ui.undoTo;
+  if (to === null) return;
+  if (to > SAFE_MAX && !S.unlock) {
+    r.ui.err = `Going back to ${db(to)} is louder than ${MINUS}10 dB. Tick “Allow above ${MINUS}10 dB” and undo again.`;
+    refreshVolume();
+    return;
+  }
+  request(r, to);
+}
+
+function openRoom(id) {
+  S.room = id; S.view = "room";
+  S.pending = null; S.toast = null; S.typed = ""; S.typedErr = "";
+}
+
+function onAct(act, el) {
+  const r = room();
+  switch (act) {
+    case "signin": S.view = "list"; break;
+    case "signout": relock(); S.view = "signin"; S.room = null; clearPending(); break;
+    case "open": openRoom(el.dataset.id); break;
+    case "back": relock(); S.view = "list"; S.room = null; clearPending(); S.toast = null; break;
+    case "read": return readVol(r);
+    case "step": request(r, displayed(r) + Number(el.dataset.dir) * stepOf(r)); return;
+    case "typed": return typedSet(r);
+    case "cancelvol": cancelVol(r); return;
+    case "undo": return undoVol(r);
+    case "power":
+    case "undopower": stagePower(el.dataset.to === "sleep"); break;
+    case "undopreset": stagePreset(el.dataset.to); break;
+    case "send": return sendPending();
+    case "cancel": clearPending(); break;
+    case "frontpanel":
+      S.rooms.find((x) => x.id === "office").dev -= 6;
+      say("Office was turned down 6 dB at the front panel. The page learns it only from a read or a write.");
+      break;
+    case "reset": reset(); break;
+  }
+  render();
+}
+
+function protoControls() {
+  return `<div class="proto">
+    <label class="check"><input type="checkbox" id="failnext" ${S.failNext ? "checked" : ""}><span>Make the next write fail (sample)</span></label>
+    <div class="row" style="flex-wrap:wrap"><button class="link" data-act="frontpanel">Turn Office down 6 dB at the front panel (sample)</button>
+    <button class="link" data-act="reset">Reset sample data</button></div>
+    <div>Prototype controls, not part of the page. Nothing here reaches a DAC.</div></div>`;
+}
+
+function render(focusSel) {
+  const a = document.activeElement;
+  const keep = focusSel || (a && a.id ? "#" + a.id : a && a.dataset && a.dataset.act ? `[data-act="${a.dataset.act}"]` : null);
+  $("#app").innerHTML = S.view === "signin" ? viewSignin() : S.view === "list" ? viewList() : viewRoom();
+  refreshVolume();
+  renderPending();
+  $("#proto").innerHTML = protoControls();
+  padForBar();
+  const el = keep ? document.querySelector(keep) : null;
+  if (el && !el.disabled) el.focus();
+}
+
+document.addEventListener("click", (e) => {
+  const el = e.target.closest("[data-act]");
+  if (!el || el.disabled) return;
+  if (el.dataset.act === "open") e.preventDefault();
+  onAct(el.dataset.act, el);
+});
+
+document.addEventListener("change", (e) => {
+  const t = e.target;
+  if (t.id === "unlock") {
+    const r = room();
+    if (r && t.checked) r.ui.err = "";
+    setUnlock(t.checked);
+    refreshVolume();
+  } else if (t.id === "failnext") {
+    S.failNext = t.checked;
+  } else if (t.name === "preset") {
+    stagePreset(t.value);
+    render(`input[name="preset"]:checked`);
+  }
+});
+
+document.addEventListener("input", (e) => {
+  const t = e.target;
+  if (t.id === "slider" && room()) request(room(), parseFloat(t.value));
+  else if (t.id === "tgt") { S.typed = t.value; $("#tgt-echo").textContent = echoTarget(S.typed); }
+});
+
+document.addEventListener("toggle", (e) => {
+  if (e.target.id === "frames") S.framesOpen = e.target.open;
+}, true);
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && e.target.id === "tgt") {
+    e.preventDefault();
+    $('[data-act="typed"]').click();
+  } else if (e.key === "Escape") {
+    if (S.pending && !S.sending) { clearPending(); render(); return; }
+    const r = room();
+    if (r && r.ui.want !== null) cancelVol(r);
+  }
+});
+
+render();
+</script>
+</body>
+</html>
