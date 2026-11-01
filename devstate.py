@@ -61,8 +61,8 @@ def dx1_pushed(h, secs):
     Returns (singles, block): {register: value} for single-frame settings, as
     0x7800-style 16-bit numbers, and {frame_index: value} for the 0x810a
     block. A later frame for the same register replaces an earlier one. Used
-    after connectState (the full state push) and after a scene recall (the
-    settings it changed), so the state is read without a readNack."""
+    after a scene recall (the settings it set), so the state is read without
+    a readNack."""
     singles, block = {}, {}
     for cmd, total, cur, val in _frames(h, secs):
         if cmd == DX1_OUT_STATE and total == DX1_BLOCK_LEN:

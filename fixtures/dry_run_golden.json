@@ -156,7 +156,7 @@
  },
  "scenes.py --device dx1ii recall c3 --dry-run": {
   "returncode": 0,
-  "stdout": "  dx1 scene recall C3 (0x7800 = 3)\n  22 33 20 01 01 11 01 00 00 00 01 00 00 66 77 00  dx1 connectState (state push = baseline)\n  22 33 20 01 01 78 00 00 00 00 03 00 00 66 77 00  dx1 recall c3\n",
+  "stdout": "  dx1 scene recall C3 (0x7800 = 3)\n  22 33 20 01 01 78 00 00 00 00 03 00 00 66 77 00  dx1 recall c3\n",
   "stderr": ""
  },
  "toppingctl.py --device dx5ii --dry-run vol -30": {

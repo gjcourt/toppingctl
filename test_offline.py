@@ -281,24 +281,17 @@ def _make_scripted_hid(writes, script):
 
 class Dx1SceneRecallTest(unittest.TestCase):
     """scenes.py on the DX1 II: 0x7800 = 1..3, behind --unverified and the
-    -10 dB guard (--force), with the before/after state taken from what the
-    device pushes -- never a readNack, which writes on this model."""
-
-    # state word 2 = headphones only; raw 690 = -30.0 dB
-    BASELINE = [
-        _pushed(0x7300, 4),
-        _pushed(0x7500, 0),
-        *_pushed_block({2: 2, 3: 690, 4: 740}),
-    ]
+    -10 dB guard (--force). The recall is the only frame sent -- no
+    connectState, never a readNack, which writes on this model -- and what it
+    set is read from what the device pushes after it."""
 
     def setUp(self):
         import scenes
 
         self.scenes = scenes
-        for name in ("DX1_CONNECT_PUSH_SECS", "DX1_RECALL_PUSH_SECS"):
-            p = mock.patch.object(scenes, name, 0.05)
-            p.start()
-            self.addCleanup(p.stop)
+        p = mock.patch.object(scenes, "DX1_RECALL_PUSH_SECS", 0.05)
+        p.start()
+        self.addCleanup(p.stop)
 
     def run_scenes(self, *argv):
         out = io.StringIO()
@@ -317,10 +310,7 @@ class Dx1SceneRecallTest(unittest.TestCase):
 
     def scripted(self, recall_push):
         writes = []
-        script = {
-            toppingctl.DX1_REG_CONNECT: self.BASELINE,
-            toppingctl.DX1_REG_SCENE: recall_push,
-        }
+        script = {toppingctl.DX1_REG_SCENE: recall_push}
         for name, value in (
             ("Device", _make_scripted_hid(writes, script)),
             ("enumerate", _fake_enumerate("DX1II")),
@@ -330,12 +320,13 @@ class Dx1SceneRecallTest(unittest.TestCase):
             self.addCleanup(p.stop)
         return writes
 
-    def test_dry_run_prints_connect_and_recall_and_opens_nothing(self):
+    def test_dry_run_prints_only_the_recall_and_opens_nothing(self):
         self.no_hardware()
         code, out = self.run_scenes("--device", "dx1ii", "recall", "c3", "--dry-run")
         self.assertEqual(code, 0)
-        self.assertIn("22 33 20 01 01 11 01 00 00 00 01", out)
         self.assertIn("22 33 20 01 01 78 00 00 00 00 03", out)
+        self.assertNotIn("22 33 20 01 01 11 01", out, "connectState is not in the spec")
+        self.assertEqual(out.count("22 33 20 01 01"), 1)
 
     def test_dx5ii_has_no_c3(self):
         self.no_hardware()
@@ -353,31 +344,40 @@ class Dx1SceneRecallTest(unittest.TestCase):
         code, _ = self.run_scenes("--device", "dx1ii", "--force", "recall", "c1")
         self.assertIn("unverified", str(code))
 
-    def test_recall_sends_two_writes_and_warns_when_loud(self):
+    def test_recall_sends_one_write_and_warns_when_loud(self):
         # raw 950 = -4.0 dB on the headphone output after the recall
         writes = self.scripted(
             [_pushed(0x7800, 2), _pushed(0x7300, 1), *_pushed_block({2: 2, 3: 950, 4: 740})]
         )
         code, out = self.run_scenes("--device", "dx1ii", "--unverified", "--force", "recall", "c2")
         self.assertEqual(code, 0)
-        self.assertEqual([(w[6], w[7]) for w in writes], [(0x11, 0x01), (0x78, 0x00)])
-        for w in writes:
-            self.assertEqual(w[0], 0x00, "report id byte missing -- _wire() was bypassed")
-            self.assertEqual(w[3], 0x20, "not a writeNack: a readNack writes on this model")
-        self.assertEqual(int.from_bytes(writes[1][8:12], "big"), 2)
+        self.assertEqual([(w[6], w[7]) for w in writes], [(0x78, 0x00)])
+        self.assertEqual(writes[0][0], 0x00, "report id byte missing -- _wire() was bypassed")
+        self.assertEqual(writes[0][3], 0x20, "not a writeNack: a readNack writes on this model")
+        self.assertEqual(int.from_bytes(writes[0][8:12], "big"), 2)
         self.assertIn("device confirmed C2", out)
         self.assertIn("WARNING: louder than -10 dB after the recall: hpVolume -4.0 dB", out)
         self.assertIn("vol -30", out)
-        self.assertRegex(out, r"hpVolume\s+-30\.0 dB\s+-> -4\.0 dB")
-        self.assertRegex(out, r"filter\s+4\s+-> 1")
-        self.assertLess(out.index("WARNING"), out.index("field(s) changed"))
+        self.assertRegex(out, r"hpVolume\s+-4\.0 dB\n")
+        self.assertRegex(out, r"filter\s+1\n")
+        self.assertLess(out.index("WARNING"), out.index("setting(s) after the recall"))
+
+    def test_lost_echo_still_warns_when_loud(self):
+        # Review of #33: the volume check must run before the echo check, or
+        # a recall that worked but lost its echo never shows the warning.
+        self.scripted([*_pushed_block({2: 2, 3: 950, 4: 740})])
+        code, out = self.run_scenes("--device", "dx1ii", "--unverified", "--force", "recall", "c2")
+        self.assertEqual(code, 1)
+        self.assertIn("WARNING: louder than -10 dB after the recall: hpVolume -4.0 dB", out)
+        self.assertIn("did not confirm", out)
+        self.assertLess(out.index("louder than"), out.index("did not confirm"))
 
     def test_quiet_recall_has_no_warning(self):
         self.scripted([_pushed(0x7800, 1), *_pushed_block({2: 2, 3: 690, 4: 740})])
         code, out = self.run_scenes("--device", "dx1ii", "--unverified", "--force", "recall", "c1")
         self.assertEqual(code, 0)
         self.assertNotIn("WARNING", out)
-        self.assertIn("nothing changed", out)
+        self.assertRegex(out, r"hpVolume\s+-30\.0 dB\n")
 
     def test_a_disabled_output_at_0_db_does_not_warn(self):
         # Seen on hardware: a headphones-only scene left optVolume at 0 dB.
@@ -385,7 +385,14 @@ class Dx1SceneRecallTest(unittest.TestCase):
         code, out = self.run_scenes("--device", "dx1ii", "--unverified", "--force", "recall", "c2")
         self.assertEqual(code, 0)
         self.assertNotIn("WARNING", out)
-        self.assertRegex(out, r"optVolume\s+-99\.0 dB\s+-> \+0\.0 dB")
+        self.assertRegex(out, r"optVolume\s+\+0\.0 dB\n")
+
+    def test_recall_with_only_the_echo_reports_no_settings(self):
+        self.scripted([_pushed(0x7800, 3)])
+        code, out = self.run_scenes("--device", "dx1ii", "--unverified", "--force", "recall", "c3")
+        self.assertEqual(code, 0)
+        self.assertIn("volume unknown", out)
+        self.assertIn("pushed no settings", out)
 
     def test_live_outputs_follow_the_state_word(self):
         live = self.scenes.dx1_live_volume_frames

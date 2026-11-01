@@ -16,9 +16,9 @@ needed to put things back.
 The DX1 II stores three scenes (C1-C3) behind a different register, 0x7800.
 Its recall needs --unverified, like every DX1 II write, and --force: the
 volume it lands on can't be known before recalling, so that is the -10 dB
-guard (AGENTS.md). The before/after snapshots come from what the device
-pushes -- its full state after connectState, then the settings the recall
-changed -- so no readNack is sent (a readNack can write on this model).
+guard (AGENTS.md). Only the recall is sent: there is no "before" snapshot,
+since a readNack can write on this model (#32). What the recall set is read
+from what the device pushes after it, and printed.
 
     ./scenes.py --device dx1ii recall c3 --dry-run
     ./scenes.py --device dx1ii --unverified --force recall c3
@@ -37,7 +37,6 @@ from toppingctl import (
     DX1_F_LOHP_VOL,
     DX1_F_MUTE,
     DX1_F_OPT_VOL,
-    DX1_REG_CONNECT,
     DX1_REG_FILTER,
     DX1_REG_HIGH_GAIN,
     DX1_REG_INPUT,
@@ -55,9 +54,8 @@ RECALL = {"c1": 0x7111, "c2": 0x7112}
 # --- DX1 II ------------------------------------------------------------------
 DX1_SLOTS = {"c1": 1, "c2": 2, "c3": 3}
 DX1_SCENE_CMD = (DX1_REG_SCENE[0] << 8) | DX1_REG_SCENE[1]
-# How long to collect each push. The connectState push is ~300 frames; the
-# recall's own push arrived within a few hundred ms on hardware.
-DX1_CONNECT_PUSH_SECS = 2.5
+# How long to collect the recall's push; it arrived within a few hundred ms
+# on hardware.
 DX1_RECALL_PUSH_SECS = 2.0
 
 # Names for the single-frame registers a push can carry, as 16-bit numbers.
@@ -129,18 +127,28 @@ def recall_dx1(a):
 
     dev = Device(a.dry_run, "dx1ii", allow_unverified=a.unverified)
     try:
-        # The baseline comes from the full state push that answers
-        # connectState: no readNack, which can write on this model.
-        dev.send(frame(*DX1_REG_CONNECT, 1), "dx1 connectState (state push = baseline)")
-        before, before_block = (
-            ({}, {}) if a.dry_run else devstate.dx1_pushed(dev.h, DX1_CONNECT_PUSH_SECS)
-        )
+        # The recall is the only frame sent. There is no "before" snapshot:
+        # the readNack that would take it can write on this model (#32).
         dev.send(frame(*DX1_REG_SCENE, slot), f"dx1 recall {a.slot}")
         if a.dry_run:
             return 0
         pushed, pushed_block = devstate.dx1_pushed(dev.h, DX1_RECALL_PUSH_SECS)
     finally:
         dev.close()
+
+    # The volume check comes first, so a recall that worked but whose echo
+    # was lost still reports a loud output.
+    loud = [
+        (name, dx1_raw_to_db(pushed_block[i]))
+        for i, name in dx1_live_volume_frames(pushed_block.get(DX1_F_STATE)).items()
+        if pushed_block.get(i) is not None and dx1_raw_to_db(pushed_block[i]) > VOL_WARN_DB
+    ]
+    if loud:
+        levels = ", ".join(f"{name} {db:+.1f} dB" for name, db in loud)
+        print(f"\n  WARNING: louder than {VOL_WARN_DB:.0f} dB after the recall: {levels}")
+        print("  Lower with: ./toppingctl.py --device dx1ii --unverified vol -30\n")
+    elif not pushed_block:
+        print("  volume unknown: no 0x810a push arrived -- check the front panel")
 
     echo = pushed.get(DX1_SCENE_CMD)
     if echo != slot:
@@ -151,35 +159,18 @@ def recall_dx1(a):
         return 1
     print(f"  device confirmed C{slot}")
 
-    after_block = {**before_block, **pushed_block}
-    loud = [
-        (name, dx1_raw_to_db(after_block[i]))
-        for i, name in dx1_live_volume_frames(after_block.get(DX1_F_STATE)).items()
-        if after_block.get(i) is not None and dx1_raw_to_db(after_block[i]) > VOL_WARN_DB
-    ]
-    if loud:
-        levels = ", ".join(f"{name} {db:+.1f} dB" for name, db in loud)
-        print(f"\n  WARNING: louder than {VOL_WARN_DB:.0f} dB after the recall: {levels}")
-        print("  Lower with: ./toppingctl.py --device dx1ii --unverified vol -30\n")
-    elif not after_block:
-        print("  volume unknown: no 0x810a push arrived -- check the front panel")
-
-    changed = [
-        (DX1_SINGLE_NAMES.get(cmd, f"0x{cmd:04x}"), str(before.get(cmd, "?")), str(v))
+    settings = [
+        (DX1_SINGLE_NAMES.get(cmd, f"0x{cmd:04x}"), str(v))
         for cmd, v in sorted(pushed.items())
-        if cmd != DX1_SCENE_CMD and before.get(cmd) != v
+        if cmd != DX1_SCENE_CMD
     ]
-    changed += [
-        (dx1_block_name(i), dx1_value(i, before_block.get(i)), dx1_value(i, v))
-        for i, v in sorted(pushed_block.items())
-        if before_block.get(i) != v
-    ]
-    if not changed:
-        print(f"  nothing changed -- {a.slot} matches the current state")
+    settings += [(dx1_block_name(i), dx1_value(i, v)) for i, v in sorted(pushed_block.items())]
+    if not settings:
+        print("  the device pushed no settings after the recall")
         return 0
-    print(f"  {len(changed)} field(s) changed:")
-    for name, b, c in changed:
-        print(f"    {name:<24} {b:<16} -> {c}")
+    print(f"  the device pushed {len(settings)} setting(s) after the recall:")
+    for name, v in settings:
+        print(f"    {name:<24} {v}")
     print("\n  PEQ is not included: the recall pushes the active slot, not the curve.")
     return 0
 
