@@ -306,7 +306,9 @@ class Dx1ReadSafeListTest(unittest.TestCase):
         )
         expected = {(int(r, 16) >> 8, int(r, 16) & 0xFF) for r in listed.split()}
         self.assertEqual(set(toppingctl.DX1_VENDOR_READ_SAFE), expected)
-        self.assertEqual(toppingctl.CONFIRMED_READS["dx1ii"], expected)
+        self.assertEqual(
+            toppingctl.CONFIRMED_READS["dx1ii"], expected - set(toppingctl.DX1_READ_WRITES)
+        )
 
     def test_0x1106_is_read_but_not_confirmed(self):
         self.assertEqual(toppingctl.DX1_REG_PEQ_DUMP, (0x11, 0x06))
@@ -316,6 +318,26 @@ class Dx1ReadSafeListTest(unittest.TestCase):
 
     def test_dx1_state_queries_only_vendor_listed_registers(self):
         self.assertLessEqual(set(devstate.DX1_STATE_QUERIES), set(toppingctl.DX1_VENDOR_READ_SAFE))
+        self.assertLessEqual(set(devstate.DX1_STATE_QUERIES), set(toppingctl.DX1_READ_REGS))
+
+    def test_vendor_listed_registers_that_write_are_never_read(self):
+        # #32: on a DX1 II, a readNack (data 0) to 0x7900 / 0x7d00 set
+        # autoStandby / autoScreenOff from 4 ("Never") to 0 -- vendor list or not.
+        bad = {(0x79, 0x00), (0x7D, 0x00)}
+        self.assertEqual(set(toppingctl.DX1_READ_WRITES), bad)
+        self.assertLessEqual(bad, set(toppingctl.DX1_VENDOR_READ_SAFE))
+        self.assertFalse(bad & set(toppingctl.DX1_READ_REGS))
+        self.assertFalse(bad & toppingctl.CONFIRMED_READS["dx1ii"])
+        self.assertFalse(bad & set(devstate.DX1_STATE_QUERIES))
+        self.assertNotIn("autoStandby", devstate.DX1_STATE_QUERIES.values())
+        self.assertNotIn("autoScreenOff", devstate.DX1_STATE_QUERIES.values())
+
+    def test_dx1_query_refuses_the_writing_registers_before_writing(self):
+        for reg in toppingctl.DX1_READ_WRITES:
+            writes = []
+            with self.subTest(reg=reg), self.assertRaisesRegex(toppingctl.Refused, "#32"):
+                devstate.dx1_query(_make_fake_hid(writes)(), *reg)
+            self.assertEqual(writes, [])
 
     def test_dx1_state_sends_readnacks_only_to_the_read_list(self):
         writes = []
@@ -328,6 +350,7 @@ class Dx1ReadSafeListTest(unittest.TestCase):
         sent = {(w[6], w[7]) for w in writes}  # report-id prefixed: reg/sub at 6/7
         self.assertTrue(all(w[3] == 0x10 for w in writes), "dx1_state sent a non-readNack")
         self.assertLessEqual(sent, set(toppingctl.DX1_READ_REGS))
+        self.assertFalse(sent & set(toppingctl.DX1_READ_WRITES), "a readNack that writes (#32)")
         # The block comes from dx1_read_block, the rest from dx1_query, 0x1106
         # from dx1_read_configs.
         self.assertEqual(
