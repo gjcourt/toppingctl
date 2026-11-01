@@ -102,7 +102,19 @@ test("a drag that pauses above -10 dB keeps the unlock and sends the rest of the
   assert.match(h.run("S.unlockNote"), /Locked again/);
 });
 
-test("the unlock still ends after 60 s and then refuses a louder change", () => {
+test("once the volume has settled, a later drag needs the unlock again (interpretation to confirm)", () => {
+  const h = open();
+  h.unlock(true);
+  h.drag(-5);
+  h.t.advance(2010);                        // flush at 0.3 s, read at 1.2 s, write at 2.0 s
+  assert.equal(h.room().vol.v, -5);
+  assert.equal(h.run("S.unlock"), false);
+  h.t.advance(2000);
+  h.drag(-4);
+  assert.match(h.room().ui.err, /Allow above/);
+});
+
+test("a write checked after the 60 s cap is refused, and so is a later louder change", () => {
   const h = open();
   h.unlock(true);
   h.t.advance(59000);
@@ -110,11 +122,32 @@ test("the unlock still ends after 60 s and then refuses a louder change", () => 
   h.t.advance(1000);                        // t = 60 s
   assert.equal(h.run("S.unlock"), false);
   assert.match(h.run("S.unlockNote"), /ran out after 60 s/);
-  h.t.advance(2000);                        // the write that started before the cap completes
-  assert.equal(h.room().vol.v, -5);
+  h.t.advance(2000);                        // the write flushed at 59.3 s is checked at 60.2 s
+  assert.equal(h.room().vol.v, -32);
+  assert.equal(h.room().dev, -32);
+  assert.equal(h.room().ui.msg.kind, "refused");
   h.drag(-4.5);
   assert.match(h.room().ui.err, /Allow above/);
-  assert.equal(h.room().dev, -5);
+});
+
+test("Cancel during a write says the write may still land", () => {
+  const h = open();
+  h.unlock(true);
+  h.drag(-5);
+  h.t.advance(300);                         // flight begins at -5
+  h.drag(-4);                               // queued behind it
+  h.run("cancelVol(room())");
+  assert.match(h.doc.els.get("#live").textContent, /may still land/);
+});
+
+test("with the step unread, the level is not changed and says what to do", () => {
+  const h = open("living");
+  h.run(`room().vol = { v: -30, src: "read", age: "x" }; room().step = { v: null, src: "unknown" };`);
+  h.run("refreshVolume()");
+  h.drag(-20);
+  assert.match(h.room().ui.err, /Read the device first/);
+  assert.equal(h.room().ui.want, null);
+  assert.equal(h.doc.els.get("#slider").disabled, true);
 });
 
 test("a changed device refuses the change and says what to do next", () => {
@@ -178,5 +211,5 @@ test("a level that was never read is shown as unknown, not as -99", () => {
 });
 
 test("the volume status is not a polite live region", () => {
-  assert.doesNotMatch(html, /id="vol-status" aria-live/);
+  assert.doesNotMatch(html, /id="vol-status"[^>]*aria-live/);
 });

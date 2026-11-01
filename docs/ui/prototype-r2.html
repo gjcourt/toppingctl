@@ -291,7 +291,8 @@ function request(r, raw) {
   const base = r.vol.v, prevErr = r.ui.err;
   const to = roundTo(r, raw);
   r.ui.undoTo = null;
-  r.ui.err = loudError(base, to, S.unlock) || "";
+  r.ui.err = (r.step.v === null ? "Read the device first: its step size isn't known yet."
+    : loudError(base, raw, S.unlock) || loudError(base, to, S.unlock)) || "";
   if (r.ui.err) { if (r.ui.err !== prevErr) say(r.ui.err); refreshVolume(); return; }
   if (r.ui.flight === null && r.ui.want === null) r.ui.burstBase = base;
   if (to === base && r.ui.flight === null) {
@@ -311,7 +312,7 @@ function request(r, raw) {
 function flush(r) {
   r.ui.timer = null;
   if (r.ui.flight !== null || r.ui.want === null) return;
-  const to = r.ui.want, expected = r.vol.v, unlocked = S.unlock;
+  const to = r.ui.want, expected = r.vol.v;
   r.ui.want = null;
   r.ui.flight = to;
   r.ui.msg = { kind: "sending" };
@@ -324,7 +325,7 @@ function flush(r) {
       return settle(r, { kind: "refused", fresh, readAt,
         text: `Changed elsewhere: ${r.name} reads ${db(fresh)}, not the ${db(expected)} this change started from. Read ${r.name} again, then set the level again.` });
     }
-    const err = loudError(fresh, to, unlocked);
+    const err = loudError(fresh, to, S.unlock);
     if (err) return settle(r, { kind: "refused", fresh, readAt, text: err });
     setTimeout(() => {
       if (S.failNext) {
@@ -332,7 +333,7 @@ function flush(r) {
         return settle(r, { kind: "failed", fresh, readAt, error: "no answer from " + r.host + " within 10 s" });
       }
       r.dev = to;
-      settle(r, { kind: "set", v: to });
+      settle(r, { kind: "set", v: r.dev });
     }, 800);
   }, 900);
 }
@@ -360,11 +361,12 @@ function settle(r, res) {
 
 function cancelVol(r) {
   if (r.ui.want === null) return;
+  const inFlight = r.ui.flight !== null;
   clearTimeout(r.ui.timer); r.ui.timer = null; r.ui.want = null;
   r.ui.msg = { kind: "cancelled" };
   relock();
   refreshVolume();
-  say("Cancelled. Nothing was sent.");
+  say(inFlight ? "Queued change cancelled. The write already being sent may still land." : "Cancelled. Nothing was sent.");
 }
 
 function setUnlock(on) {
@@ -380,6 +382,7 @@ function setUnlock(on) {
 function relock() {
   S.unlock = false; S.unlockNote = "";
   clearInterval(S.unlockTimer); S.unlockTimer = null;
+  renderPending();
 }
 
 function volumeCard(r, w) {
@@ -456,6 +459,7 @@ function refreshVolume() {
   const shown = displayed(r), cap = capOf(r.vol.v), step = r.step.v;
   slider.max = Math.max(cap, shown);
   slider.step = step || 0.5;
+  slider.disabled = step === null;
   slider.value = shown;
   slider.setAttribute("aria-valuetext", db(shown));
   const loudSending = r.ui.flight !== null && r.ui.flight > SAFE_MAX;
@@ -463,7 +467,7 @@ function refreshVolume() {
   $("#vol-down").disabled = step === null || shown - step < VOL_MIN;
   $("#vol-up").disabled = step === null || shown + step > cap;
   $("#vol-step-note").textContent = step === null
-    ? "The step size hasn't been read yet. Read the device to enable + and −."
+    ? "The step size hasn't been read yet. Read the device before changing the level."
     : `Steps of ${step} dB, from the device's volumeStep. The step is read again before each write.`;
   $("#vol-status").innerHTML = statusHtml(r);
   $("#unlock").checked = S.unlock;
@@ -554,10 +558,15 @@ function clearPending() { S.pending = null; S.said = null; }
 // Decision 12: a preset that raises the preamp needs the unlock when the level
 // plus the rise goes above -10 dB. An unknown last-written preamp counts as loud.
 function presetNeedsUnlock(r, to, level) {
-  if (to.pre === null) return false;                 // Flat leaves the preamp alone
+  if (to.pre === null) return false;                 // Flat turns all bands off, so no band gain counts as rise
   if (r.preamp.v === null) return true;
   const rise = to.pre - r.preamp.v;
   return rise > 0 && (level === null || level + rise > SAFE_MAX);
+}
+function loudReason(r) {
+  if (r.preamp.v === null) return "the current preamp isn't known, so this preset counts as loud";
+  if (r.vol.v === null) return "the level isn't known, so this preset counts as loud";
+  return `this preset would take the level above ${MINUS}10 dB`;
 }
 
 function renderPending() {
@@ -571,7 +580,7 @@ function renderPending() {
     <div class="tag">${S.sending ? "Sending…" : "Preview · nothing sent yet"}</div>
     <div class="what num">${esc(p.what)}</div>
     ${p.note ? `<div class="banner warn">${esc(p.note)}</div>` : ""}
-    ${blocked ? `<div class="banner warn">Needs “Allow above ${MINUS}10 dB” first: with this preamp rise the level would go above ${MINUS}10 dB.</div>` : ""}
+    ${blocked ? `<div class="banner warn">Needs “Allow above ${MINUS}10 dB” first: ${loudReason(r)}.</div>` : ""}
     <details id="frames" ${S.framesOpen ? "open" : ""}><summary>Frames to send</summary><pre>${esc(p.frames)}</pre></details>
     <div class="acts"><button data-act="cancel" ${S.sending ? "disabled" : ""}>Cancel</button>
       <button class="primary" data-act="send" ${S.sending || blocked ? "disabled" : ""}>${S.sending ? "Sending to " + esc(r.host) + "…" : "Send to " + esc(r.name)}</button></div>
@@ -591,9 +600,9 @@ function sendPending() {
   const r = room(), p = S.pending;
   if (!writable(r)) { clearPending(); render(); return; }
   const to = p.kind === "preset" ? PRESETS.find((x) => x.id === p.to) : null;
-  const loud = to !== null && presetNeedsUnlock(r, to, r.dev);
+  const loud = to !== null && presetNeedsUnlock(r, to, r.vol.v);
   if (loud && !S.unlock) {
-    S.toast = { room: r.id, kind: "bad", html: `<strong>Not sent.</strong> ${esc(r.name)} reads ${esc(db(r.dev))} now, and this preset would take the level above ${MINUS}10 dB. Tick “Allow above ${MINUS}10 dB”, then send again.` };
+    S.toast = { room: r.id, kind: "bad", html: `<strong>Not sent.</strong> ${esc(r.name)}: ${loudReason(r)}. Tick “Allow above ${MINUS}10 dB”, then send again.` };
     render(); say(plain(S.toast.html)); return;
   }
   S.sending = true; render();
@@ -605,7 +614,7 @@ function sendPending() {
       render(`[data-act="send"]`); say(plain(S.toast.html)); return;
     }
     S.pending = null; S.said = null;
-    if (loud) relock();                                 // a plan's allow_loud is single-use
+    if (loud && S.rooms.every((x) => x.ui.flight === null && x.ui.want === null)) relock();  // a volume gesture in progress keeps the checkbox
     if (p.kind === "preset") {
       r.preset = { v: p.to, src: "written", age: "just now" };
       if (to.pre !== null) r.preamp = { v: to.pre, src: "written", age: "just now" };
