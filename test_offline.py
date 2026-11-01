@@ -916,7 +916,7 @@ class LockHardeningTest(LockTempDirs):
             self.assertEqual(fh.read(), "precious\n")
 
     def assertRefused(self, reason):
-        with self.assertRaises(toppingctl.UnsafeLock) as cm:
+        with self.assertRaises(toppingctl.UnsafePath) as cm:
             toppingctl.acquire_device_lock(0)
         self.assertIn(reason, cm.exception.strerror)
         self.assertEqual(toppingctl._lock["depth"], 0)
@@ -1035,8 +1035,117 @@ class LockHardeningTest(LockTempDirs):
                 toppingctl._check_lock_dir(st, "/d")
             for st in bad:
                 with self.subTest(mode=oct(st.st_mode), uid=st.st_uid, gid=st.st_gid):
-                    with self.assertRaises(toppingctl.UnsafeLock):
+                    with self.assertRaises(toppingctl.UnsafePath):
                         toppingctl._check_lock_dir(st, "/d")
+
+
+class SaveStateTest(unittest.TestCase):
+    """save_state writes through the checked directory fd with a temp file
+    and a rename. In the shared root:toppingd directory a group member could
+    plant state.json -> /etc/whatever; a root run must not write through it."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = tmp.name
+        self.dir = os.path.join(self.tmp, "state")
+        os.mkdir(self.dir)
+        os.chmod(self.dir, 0o755)
+        self.file = os.path.join(self.dir, "state.json")
+        for p in (
+            mock.patch.object(toppingctl, "STATE_DIR", self.dir),
+            mock.patch.object(toppingctl, "STATE_FILE", self.file),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def target(self):
+        path = os.path.join(self.tmp, "precious")
+        with open(path, "w") as fh:
+            fh.write("precious\n")
+        return path
+
+    def assertUntouched(self, path):
+        with open(path) as fh:
+            self.assertEqual(fh.read(), "precious\n")
+
+    def assertNoTempLeft(self):
+        self.assertEqual([n for n in os.listdir(self.dir) if n != "state.json"], [])
+
+    def test_writes_and_replaces(self):
+        toppingctl.save_state({"volume_db": -30})
+        toppingctl.save_state({"volume_db": -20})
+        self.assertEqual(toppingctl.load_state(), {"volume_db": -20})
+        self.assertNoTempLeft()
+
+    def test_creates_a_missing_dir_0700(self):
+        os.rmdir(self.dir)
+        toppingctl.save_state({})
+        self.assertEqual(os.stat(self.dir).st_mode & 0o777, 0o700)
+
+    def test_planted_symlink_is_replaced_not_followed(self):
+        target = self.target()
+        os.symlink(target, self.file)
+        toppingctl.save_state({"volume_db": -30})
+        self.assertUntouched(target)
+        self.assertFalse(os.path.islink(self.file))
+        self.assertEqual(toppingctl.load_state(), {"volume_db": -30})
+        self.assertNoTempLeft()
+
+    def test_planted_hard_link_target_is_untouched(self):
+        target = self.target()
+        os.link(target, self.file)
+        toppingctl.save_state({"volume_db": -30})
+        self.assertUntouched(target)
+
+    def test_symlinked_dir_refuses(self):
+        real = os.path.join(self.tmp, "real")
+        os.rename(self.dir, real)
+        os.symlink(real, self.dir)
+        with self.assertRaises(SystemExit) as cm:
+            toppingctl.save_state({})
+        self.assertIn(f"cannot write the state cache {self.file}", str(cm.exception.code))
+        self.assertEqual(os.listdir(real), [])
+
+    def test_group_writable_dir_refuses(self):
+        os.chmod(self.dir, 0o775)
+        with self.assertRaises(SystemExit) as cm:
+            toppingctl.save_state({})
+        self.assertIn("writable by group or others", str(cm.exception.code))
+        self.assertEqual(os.listdir(self.dir), [])
+
+    def test_temp_file_owner_check_refuses_and_cleans_up(self):
+        with open(self.file, "w") as fh:
+            fh.write("precious\n")
+        with (
+            mock.patch.object(os, "geteuid", return_value=os.getuid() + 1),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            toppingctl.save_state({})
+        self.assertIn("owned by uid", str(cm.exception.code))
+        self.assertUntouched(self.file)
+        self.assertNoTempLeft()
+
+
+class MetersTakesTheLockAsAWriteTest(LockTempDirs):
+    """meters.py sends the 71 34 heartbeat to the commit register, so an
+    unusable lock must refuse it, as it refuses volume writes."""
+
+    def test_unusable_lock_refuses(self):
+        import meters
+
+        os.chmod(self.sysdir, 0o775)
+
+        def no_device(*a, **kw):
+            raise AssertionError("opened the device without the lock")
+
+        with (
+            mock.patch.object(sys, "argv", ["meters.py"]),
+            mock.patch.object(meters, "open_checked", no_device),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            meters.main()
+        self.assertIn("Refusing to write.", str(cm.exception.code))
 
 
 class StateDirTest(unittest.TestCase):

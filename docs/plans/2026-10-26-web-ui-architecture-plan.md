@@ -462,7 +462,8 @@ George is the only user (decision 6), but there are still several writers.
 - **Who takes it.** A lock helper in `toppingctl.py` is taken in the `main()` of **every entry
   point that opens the device**, because the device grants one handle. That means:
   - `toppingctl.py`, `scenes.py`, `setctl.py`, `probe.py` and `smoke.py`;
-  - `meters.py`, `listen.py` and `readsettings.py`;
+  - `meters.py`, `listen.py` and `readsettings.py`. Of these, `meters.py` counts as a write:
+    its 71 34 heartbeat goes to the commit register, so it refuses when the lock is unusable;
   - the agent, around each operation.
 
   Library code such as `devstate.py` and `Device` never takes it. The helper is also reentrant
@@ -523,10 +524,17 @@ would leave a file the `toppingd` user can't rewrite. To prevent that, the direc
 same directory and refuses a lock directory that is group- or other-writable, with two
 exceptions: a root-owned directory with the sticky bit, and this one. A group-writable lock
 directory is accepted only when it is owned by root **and its group is `toppingd`** (and it is
-not other-writable). A `toppingd` member can create files there, so the helper's checks on the
-opened file are what stop it being turned against a root run: the directory is opened once and
-used through that fd, the file is opened with `O_NOFOLLOW` and `O_NONBLOCK`, and it must be a
-regular file owned by the caller or root with exactly one link.
+not other-writable). A `toppingd` member can create files there, such as a symlink
+`state.json -> /etc/whatever` or a planted `device.lock`. So the checks on the opened files are
+what stop the directory being turned against a root run. Both files go through one fd on the
+checked directory, so it can't be swapped mid-way.
+
+- **`device.lock`:** opened with `O_NOFOLLOW` and `O_NONBLOCK`. It must be a regular file owned
+  by the caller or root, with exactly one link.
+- **`state.json`:** `save_state` never opens the existing file. It writes a fresh temp file
+  (`O_EXCL | O_NOFOLLOW`, with the same owner and single-link checks) and renames it over
+  `state.json`. A planted symlink or hard link is replaced, and its target is never written.
+  Because it is a rename, either side can replace a `state.json` the other wrote.
 
 ## Repo layout and language
 

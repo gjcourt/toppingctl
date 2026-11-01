@@ -68,8 +68,10 @@ command waits up to 15 s, then exits naming the holder. The lock is refused (a
 write exits, a read warns) if it is a symlink, a hard link, not a regular file, or
 owned by anyone other than you or root. It is also refused if its directory is a
 symlink or is writable by group or others. The exceptions are a root-owned sticky
-directory and the agent's `root:toppingd` directory (not other-writable). If an older version left `~/.toppingctl` group-writable,
-run `chmod go-w ~/.toppingctl`.
+directory and the agent's `root:toppingd` directory (not other-writable). If an
+older version left `~/.toppingctl` group-writable, run `chmod go-w ~/.toppingctl`.
+`state.json` is written under the same directory rule, as a temp file renamed into
+place, so a symlink planted at that path is replaced rather than written through.
 
 ## How it works
 

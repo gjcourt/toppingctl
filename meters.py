@@ -49,7 +49,9 @@ def main():
     ap.add_argument("--device", default="dx5ii")
     a = ap.parse_args()
 
-    with cli_device_lock(write=False):
+    # A write, not a read: the 71 34 heartbeat goes to the commit register,
+    # so it must refuse when the lock is unusable, as volume writes do.
+    with cli_device_lock(write=True):
         return meter(a)
 
 

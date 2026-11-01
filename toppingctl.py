@@ -875,11 +875,30 @@ def load_state():
 
 
 def save_state(st):
-    # 0700: the default ~/.toppingctl also holds the device lock, which
-    # refuses a group- or other-writable directory.
-    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
-    with open(STATE_FILE, "w") as fh:
-        json.dump(st, fh, indent=2)
+    """Write state.json through the checked directory fd: a fresh temp file
+    (O_EXCL, O_NOFOLLOW) renamed over it. In the shared root:toppingd
+    directory a group member could plant state.json -> /etc/whatever;
+    rename replaces that symlink instead of writing through it."""
+    name = os.path.basename(STATE_FILE)
+    tmp = f".{name}.{os.getpid()}.tmp"
+    try:
+        dfd = _open_checked_dir(STATE_DIR, create=True)
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+            fd = os.open(tmp, flags, 0o666, dir_fd=dfd)  # the umask applies, as open() did
+            try:
+                with os.fdopen(fd, "w") as fh:
+                    _check_owned_file(fd)
+                    json.dump(st, fh, indent=2)
+                os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp, dir_fd=dfd)
+                raise
+        finally:
+            os.close(dfd)
+    except UnsafePath as e:
+        sys.exit(f"cannot write the state cache {STATE_FILE}: {e.strerror}. It was not updated.")
 
 
 # --- device lock ------------------------------------------------------------
@@ -913,10 +932,11 @@ def lock_path():
     return os.path.join(os.path.expanduser("~/.toppingctl"), LOCK_NAME)
 
 
-class UnsafeLock(OSError):
-    """The lock file or its directory could be turned against whoever opens
-    it (a root run truncates and writes the file). Handled like any other
-    lock file that can't be opened: a write refuses, a read warns."""
+class UnsafePath(OSError):
+    """The lock file, state.json or their directory could be turned against
+    whoever opens it (a root run truncates and writes these files). For the
+    lock, handled like any lock file that can't be opened: a write refuses,
+    a read warns."""
 
     def __init__(self, reason):
         super().__init__(reason)
@@ -938,19 +958,39 @@ def _check_lock_dir(st, path):
                 return
         except KeyError:
             pass
-    raise UnsafeLock(f"its directory is writable by group or others (chmod go-w {path})")
+    raise UnsafePath(f"its directory is writable by group or others (chmod go-w {path})")
 
 
-def _check_lock_file(fd):
-    """The opened lock must be a regular file, owned by us or root, and not
-    a hard link to some other file."""
+def _check_owned_file(fd):
+    """An opened lock or state file must be a regular file, owned by us or
+    root, and not a hard link to some other file."""
     st = os.fstat(fd)
     if not stat.S_ISREG(st.st_mode):
-        raise UnsafeLock("it is not a regular file")
+        raise UnsafePath("it is not a regular file")
     if st.st_uid not in (os.geteuid(), 0):
-        raise UnsafeLock(f"it is owned by uid {st.st_uid}, not this user or root")
+        raise UnsafePath(f"it is owned by uid {st.st_uid}, not this user or root")
     if st.st_nlink != 1:
-        raise UnsafeLock("it has more than one hard link")
+        raise UnsafePath("it has more than one hard link")
+
+
+def _open_checked_dir(path, create):
+    """An fd on `path`, which passed _check_lock_dir. The directory is
+    checked and used through this one fd, so it can't be swapped for a
+    symlink between the check and the open. `create` makes it 0700."""
+    if create:
+        os.makedirs(path, mode=0o700, exist_ok=True)
+    try:
+        dfd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise UnsafePath("its directory is a symbolic link or not a directory") from None
+        raise
+    try:
+        _check_lock_dir(os.fstat(dfd), path)
+    except BaseException:
+        os.close(dfd)
+        raise
+    return dfd
 
 
 def _open_lock(path):
@@ -960,18 +1000,8 @@ def _open_lock(path):
     follows a symlink: a root run truncates this file."""
     lock_dir, name = os.path.split(path)
     system = path.startswith(LOCK_SYSTEM_DIR + os.sep)
-    if not system:
-        os.makedirs(lock_dir, mode=0o700, exist_ok=True)
-    # The directory is checked and used through one fd, so it can't be
-    # swapped for a symlink between the check and the open.
+    dfd = _open_checked_dir(lock_dir, create=not system)
     try:
-        dfd = os.open(lock_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-    except OSError as e:
-        if e.errno in (errno.ELOOP, errno.ENOTDIR):
-            raise UnsafeLock("its directory is a symbolic link or not a directory") from None
-        raise
-    try:
-        _check_lock_dir(os.fstat(dfd), lock_dir)
         # O_NONBLOCK: a FIFO planted here must fail the regular-file check,
         # not hang the read-only open.
         flags = os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
@@ -983,12 +1013,12 @@ def _open_lock(path):
                 fd, writable = os.open(name, os.O_RDONLY | flags, dir_fd=dfd), False
         except OSError as e:
             if e.errno == errno.ELOOP:
-                raise UnsafeLock("it is a symbolic link") from None
+                raise UnsafePath("it is a symbolic link") from None
             raise
     finally:
         os.close(dfd)
     try:
-        _check_lock_file(fd)
+        _check_owned_file(fd)
     except BaseException:
         os.close(fd)
         raise
