@@ -94,7 +94,7 @@ doesn't count.
 
 | Mistake | Cost | How it could happen | What the design does |
 | --- | --- | --- | --- |
-| **Loud volume into headphones** | Irreversible: hearing, drivers | Mistyped value. A slider dragged too far. A "+" step from a stale cached value. The wrong `volumeStep` scale | The slider and steppers **stop at −10 dB**. If a room is already louder than that, they can only go quieter. Above −10 dB, a separate **"Allow above −10 dB"** control in the room view unlocks the range for **one change**, then re-locks. A "+" step needs a volume **read from the device this session**. From a cached value, only a typed absolute target is allowed, and there is no undo back to the cached value. The step size shown comes from the device read |
+| **Loud volume into headphones** | Irreversible: hearing, drivers | Mistyped value. A slider dragged too far. A "+" step from a stale cached value. The wrong `volumeStep` scale | The slider and steppers **stop at −10 dB**. If a room is already louder than that, they can only go quieter. Above −10 dB, a separate **"Allow above −10 dB"** control in the room view unlocks the range for **one change**, then re-locks. *Note (TOPPINGCTL-10, 2026-11-01): for volume it covers one gesture, a burst of changes until the volume settles, for at most 60 s; see decision 13 in the [architecture plan](../plans/2026-10-26-web-ui-architecture-plan.md).* A "+" step needs a volume **read from the device this session**. From a cached value, only a typed absolute target is allowed, and there is no undo back to the cached value. The step size shown comes from the device read |
 | **Loud volume from a scene recall** | Same as above | C1 and C2 can hold any volume, and their contents can't be read before recall (`scenes.py`) | A recall needs its own "Allow above −10 dB for this change" tick in the preview. As `scenes.py` does, the state is read just before and just after the recall. If the volume ended above −10 dB, a large **"Lower to −30 dB"** button comes first, then the before/after diff |
 | **Louder after a PEQ preset change** | Loud. The preamp sets the overall level, and the filters then cut or boost single frequencies on top | Each preset carries its own preamp (from −1.1 to −6.7 dB in `presets/`). Going from E3 (−1.1 dB) to Sundara (−6.7 dB) and back raises the overall level 5.6 dB. "Flat" leaves the preamp alone, so frequencies the old preset cut get louder | The preview states a preamp rise and its size in dB. For Flat, it says the preamp stays where it is. When the current preamp is unknown, the preview says the level change is unknown. Whether a rise also needs the unlock is question 12 |
 | **Gain switched to high** | Louder by an amount **not measured** here | Toggling gain on a headphone output | **Not in r1.** Gain is a loudness control and needs the same treatment as volume. See question 8 |
@@ -156,7 +156,9 @@ reachability must be reported per host.
 3. **How does unlocking above −10 dB work?**
    - (a) A checkbox in the room view that covers one change and re-locks after Send or Cancel.
      *(the prototype's default. It could also expire after a timeout, which the prototype
-     doesn't do.)*
+     doesn't do.)* *Note (TOPPINGCTL-10, 2026-11-01): for volume, the answer is now "one gesture,
+     ≤ 60 s": the checkbox covers a burst of changes until the volume settles, and times out at
+     60 s. See decision 13 in the [architecture plan](../plans/2026-10-26-web-ui-architecture-plan.md).*
    - (b) Type the target in dB to confirm, like typing a repo name to delete it.
    - (c) Not available in the web UI at all. Loud levels only via the CLI's `--force`.
 4. **How does the UI reach each room's DAC?**

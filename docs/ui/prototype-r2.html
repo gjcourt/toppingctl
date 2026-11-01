@@ -13,8 +13,8 @@
   Volume changes send without a preview: the UI shows the target at once, sends
   the latest target after 300 ms of quiet, keeps one write in flight per room,
   and the (simulated) agent re-reads the device before each write. The -10 dB
-  unlock is a checkbox that lasts 60 s and covers one Send. Presets and power
-  keep the preview bar.
+  unlock is a checkbox for one gesture: a burst of changes until the volume
+  settles, at most 60 s. Presets and power keep the preview bar.
 -->
 <style>
   :root {
@@ -288,11 +288,11 @@ function capOf(base) {
 }
 
 function request(r, raw) {
-  const base = r.vol.v;
+  const base = r.vol.v, prevErr = r.ui.err;
   const to = roundTo(r, raw);
   r.ui.undoTo = null;
   r.ui.err = loudError(base, to, S.unlock) || "";
-  if (r.ui.err) { refreshVolume(); return; }
+  if (r.ui.err) { if (r.ui.err !== prevErr) say(r.ui.err); refreshVolume(); return; }
   if (r.ui.flight === null && r.ui.want === null) r.ui.burstBase = base;
   if (to === base && r.ui.flight === null) {
     clearTimeout(r.ui.timer); r.ui.timer = null; r.ui.want = null;
@@ -315,14 +315,14 @@ function flush(r) {
   r.ui.want = null;
   r.ui.flight = to;
   r.ui.msg = { kind: "sending" };
-  if (unlocked) relock();          // one Send uses the unlock, whatever it sends
   refreshVolume();
+  say("Sending " + db(to) + " to " + r.host + ".");
   // Agent side: read the device, check it, write, read back.
   setTimeout(() => {
     const fresh = r.dev, readAt = clock();
     if (fresh !== expected) {
       return settle(r, { kind: "refused", fresh, readAt,
-        text: `Changed elsewhere: ${r.name} reads ${db(fresh)}, not the ${db(expected)} this change started from.` });
+        text: `Changed elsewhere: ${r.name} reads ${db(fresh)}, not the ${db(expected)} this change started from. Read ${r.name} again, then set the level again.` });
     }
     const err = loudError(fresh, to, unlocked);
     if (err) return settle(r, { kind: "refused", fresh, readAt, text: err });
@@ -351,7 +351,11 @@ function settle(r, res) {
     r.ui.want = null;               // input typed against the old value is dropped
     clearTimeout(r.ui.timer); r.ui.timer = null;
   }
+  if (S.unlock && S.rooms.every((x) => x.ui.flight === null && x.ui.want === null)) {
+    relock(); S.unlockNote = "Locked again: the volume has settled.";
+  }
   refreshVolume();
+  say(plain(statusHtml(r)));
 }
 
 function cancelVol(r) {
@@ -360,6 +364,7 @@ function cancelVol(r) {
   r.ui.msg = { kind: "cancelled" };
   relock();
   refreshVolume();
+  say("Cancelled. Nothing was sent.");
 }
 
 function setUnlock(on) {
@@ -368,7 +373,7 @@ function setUnlock(on) {
   clearInterval(S.unlockTimer);
   S.unlockTimer = setInterval(() => {
     S.unlockLeft -= 1;
-    if (S.unlockLeft <= 0) { relock(); S.unlockNote = `The unlock ran out after ${UNLOCK_S} s.`; }
+    if (S.unlockLeft <= 0) { relock(); S.unlockNote = `The unlock ran out after ${UNLOCK_S} s.`; say(S.unlockNote); }
     refreshVolume();
   }, 1000);
 }
@@ -382,9 +387,10 @@ function volumeCard(r, w) {
     <div id="vol-prov">${prov(r.vol, r)}</div>`;
   if (!w) {
     const why = r.reach === "down" ? "Can't change: the host isn't answering." : VIEW_ONLY;
+    if (r.vol.v === null) return html + `<div class="why">${why}</div>`;
     return html + `<div class="stepper">
       <button disabled aria-label="${esc(r.name)}: quieter">${MINUS}</button>
-      <input type="range" disabled aria-label="${esc(r.name)} volume" min="${VOL_MIN}" max="0" value="${r.vol.v ?? VOL_MIN}">
+      <input type="range" disabled aria-label="${esc(r.name)} volume" min="${VOL_MIN}" max="0" value="${r.vol.v}">
       <button disabled aria-label="${esc(r.name)}: louder">+</button>
     </div><div class="why">${why}</div>`;
   }
@@ -395,12 +401,12 @@ function volumeCard(r, w) {
   const step = r.step.v;
   return html + `
     <div class="stepper">
-      <button id="vol-down" data-act="step" data-dir="-1" aria-label="${esc(r.name)}: quieter by ${step ?? "?"} dB">${MINUS}</button>
+      <button id="vol-down" data-act="step" data-dir="-1" aria-label="${esc(r.name)}: quieter, ${step === null ? "step unknown" : `by ${step} dB`}">${MINUS}</button>
       <div>
         <input type="range" id="slider" min="${VOL_MIN}" aria-label="${esc(r.name)} volume">
         <div class="scale num"><span>${MINUS}99 dB</span><span id="vol-cap"></span></div>
       </div>
-      <button id="vol-up" data-act="step" data-dir="1" aria-label="${esc(r.name)}: louder by ${step ?? "?"} dB">+</button>
+      <button id="vol-up" data-act="step" data-dir="1" aria-label="${esc(r.name)}: louder, ${step === null ? "step unknown" : `by ${step} dB`}">+</button>
     </div>
     <div class="why" id="vol-step-note"></div>
     <div class="target"><label for="tgt">Set to</label>
@@ -410,9 +416,9 @@ function volumeCard(r, w) {
     <div id="tgt-hint" class="why">Levels are below 0 dB, so type how far below: 32 means ${MINUS}32.0 dB.
       <span id="tgt-echo" class="num">${esc(echoTarget(S.typed))}</span></div>
     <div id="tgt-err" class="err">${esc(S.typedErr)}</div>
-    <div id="vol-status" aria-live="polite"></div>
+    <div id="vol-status"></div>
     <label class="check"><input type="checkbox" id="unlock" ${S.unlock ? "checked" : ""}>
-      <span>Allow above ${MINUS}10 dB for one Send${r.output.hp ? " <strong>(output is headphones)</strong>" : ""}</span></label>
+      <span>Allow above ${MINUS}10 dB for one gesture, up to 60 s${r.output.hp ? " <strong>(output is headphones)</strong>" : ""}</span></label>
     <div id="unlock-note" class="why"></div>`;
 }
 
@@ -452,7 +458,8 @@ function refreshVolume() {
   slider.step = step || 0.5;
   slider.value = shown;
   slider.setAttribute("aria-valuetext", db(shown));
-  $("#vol-cap").textContent = S.unlock ? "unlocked for one Send" : cap > SAFE_MAX ? `now ${db(cap)}, quieter only` : `${MINUS}10 dB limit`;
+  const loudSending = r.ui.flight !== null && r.ui.flight > SAFE_MAX;
+  $("#vol-cap").textContent = loudSending ? "loud send in progress" : S.unlock ? "unlocked for this gesture" : cap > SAFE_MAX ? `now ${db(cap)}, quieter only` : `${MINUS}10 dB limit`;
   $("#vol-down").disabled = step === null || shown - step < VOL_MIN;
   $("#vol-up").disabled = step === null || shown + step > cap;
   $("#vol-step-note").textContent = step === null
@@ -461,7 +468,7 @@ function refreshVolume() {
   $("#vol-status").innerHTML = statusHtml(r);
   $("#unlock").checked = S.unlock;
   $("#unlock-note").textContent = S.unlock
-    ? `Unlocked for one Send. It locks again after the next Send or Cancel, or in ${S.unlockLeft} s.`
+    ? `Unlocked for this gesture. It locks when the volume settles, on Cancel, or in ${S.unlockLeft} s.`
     : S.unlockNote;
   $("#tgt-err").textContent = S.typedErr;
 }
@@ -489,12 +496,11 @@ function echoTarget(text) {
 function powerBlock(r, w) {
   const p = r.power;
   let html = `<div class="row"><span class="grow">${esc(p.v ?? "Unknown")}</span></div><div>${prov(p, r)}</div>
-    <div class="why">What the DAC reports while asleep hasn't been measured yet (architecture plan, step 2). Until it has, this shows what toppingctl last wrote.</div>`;
+    <div class="why">The power state shows where it came from, as volume does. What the DAC reports while asleep hasn't been measured yet (architecture plan, step 2).</div>`;
   if (!w) return html + `<div class="why">${r.reach === "down" ? "Can't change: the host isn't answering." : VIEW_ONLY}</div>`;
-  const awake = p.v !== "Asleep";
   return html + `<div class="pair">
-      <button data-act="power" data-to="sleep" ${awake ? "" : "disabled"}>Sleep ${esc(r.name)}</button>
-      <button data-act="power" data-to="wake" ${awake ? "disabled" : ""}>Wake ${esc(r.name)}</button></div>
+      <button data-act="power" data-to="sleep" ${p.v === "Asleep" ? "disabled" : ""}>Sleep ${esc(r.name)}</button>
+      <button data-act="power" data-to="wake" ${p.v === "Awake" ? "disabled" : ""}>Wake ${esc(r.name)}</button></div>
     <div class="why">Sleep and wake show a preview before anything is sent.</div>`;
 }
 
@@ -502,6 +508,7 @@ function stagePower(sleep) {
   const r = room();
   S.pending = { kind: "power", to: sleep ? "sleep" : "wake",
     what: sleep ? `Put ${r.name} to sleep` : `Wake ${r.name}`,
+    note: r.power.v === null ? "Current power state unknown. The page hasn't read it, so it can't say whether this changes anything." : "",
     frames: `power register 71 01 = ${sleep ? 0 : 1} (${sleep ? "sleep" : "wake"}), with the checksum the device requires. One frame; no commit.` };
 }
 
@@ -544,19 +551,30 @@ function stagePreset(id) {
 
 function clearPending() { S.pending = null; S.said = null; }
 
+// Decision 12: a preset that raises the preamp needs the unlock when the level
+// plus the rise goes above -10 dB. An unknown last-written preamp counts as loud.
+function presetNeedsUnlock(r, to, level) {
+  if (to.pre === null) return false;                 // Flat leaves the preamp alone
+  if (r.preamp.v === null) return true;
+  const rise = to.pre - r.preamp.v;
+  return rise > 0 && (level === null || level + rise > SAFE_MAX);
+}
+
 function renderPending() {
   const el = $("#pending");
   const p = S.pending;
   if (!p || S.view !== "room") { el.hidden = true; el.innerHTML = ""; S.said = null; return; }
   const r = room();
+  const blocked = p.kind === "preset" && !S.unlock && presetNeedsUnlock(r, PRESETS.find((x) => x.id === p.to), r.vol.v);
   el.hidden = false;
   el.innerHTML = `<div class="in" role="region" aria-label="Pending change">
     <div class="tag">${S.sending ? "Sending…" : "Preview · nothing sent yet"}</div>
     <div class="what num">${esc(p.what)}</div>
     ${p.note ? `<div class="banner warn">${esc(p.note)}</div>` : ""}
+    ${blocked ? `<div class="banner warn">Needs “Allow above ${MINUS}10 dB” first: with this preamp rise the level would go above ${MINUS}10 dB.</div>` : ""}
     <details id="frames" ${S.framesOpen ? "open" : ""}><summary>Frames to send</summary><pre>${esc(p.frames)}</pre></details>
     <div class="acts"><button data-act="cancel" ${S.sending ? "disabled" : ""}>Cancel</button>
-      <button class="primary" data-act="send" ${S.sending ? "disabled" : ""}>${S.sending ? "Sending to " + esc(r.host) + "…" : "Send to " + esc(r.name)}</button></div>
+      <button class="primary" data-act="send" ${S.sending || blocked ? "disabled" : ""}>${S.sending ? "Sending to " + esc(r.host) + "…" : "Send to " + esc(r.name)}</button></div>
   </div>`;
   if (S.said !== p.what) { S.said = p.what; say("Preview: " + p.what + ". Nothing sent yet. Send and Cancel are after the page."); }
 }
@@ -572,6 +590,12 @@ if (window.ResizeObserver) new ResizeObserver(padForBar).observe($("#pending"));
 function sendPending() {
   const r = room(), p = S.pending;
   if (!writable(r)) { clearPending(); render(); return; }
+  const to = p.kind === "preset" ? PRESETS.find((x) => x.id === p.to) : null;
+  const loud = to !== null && presetNeedsUnlock(r, to, r.dev);
+  if (loud && !S.unlock) {
+    S.toast = { room: r.id, kind: "bad", html: `<strong>Not sent.</strong> ${esc(r.name)} reads ${esc(db(r.dev))} now, and this preset would take the level above ${MINUS}10 dB. Tick “Allow above ${MINUS}10 dB”, then send again.` };
+    render(); say(plain(S.toast.html)); return;
+  }
   S.sending = true; render();
   setTimeout(() => {
     S.sending = false;
@@ -581,8 +605,8 @@ function sendPending() {
       render(`[data-act="send"]`); say(plain(S.toast.html)); return;
     }
     S.pending = null; S.said = null;
+    if (loud) relock();                                 // a plan's allow_loud is single-use
     if (p.kind === "preset") {
-      const to = PRESETS.find((x) => x.id === p.to);
       r.preset = { v: p.to, src: "written", age: "just now" };
       if (to.pre !== null) r.preamp = { v: to.pre, src: "written", age: "just now" };
       S.toast = { room: r.id, kind: "info", html: `Applied “${esc(presetName(p.to))}” to ${esc(r.name)}.` +
@@ -691,6 +715,7 @@ document.addEventListener("change", (e) => {
     if (r && t.checked) r.ui.err = "";
     setUnlock(t.checked);
     refreshVolume();
+    renderPending();
   } else if (t.id === "failnext") {
     S.failNext = t.checked;
   } else if (t.name === "preset") {
