@@ -880,7 +880,8 @@ def save_state(st):
     directory a group member could plant state.json -> /etc/whatever;
     rename replaces that symlink instead of writing through it."""
     name = os.path.basename(STATE_FILE)
-    tmp = f".{name}.{os.getpid()}.tmp"
+    # Random, so another account in the directory can't pre-create it.
+    tmp = f".{name}.{os.getpid()}.{os.urandom(4).hex()}.tmp"
     try:
         dfd = _open_checked_dir(STATE_DIR, create=True)
         try:
