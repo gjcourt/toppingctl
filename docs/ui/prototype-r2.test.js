@@ -98,20 +98,41 @@ test("a drag that pauses above -10 dB keeps the unlock and sends the rest of the
   assert.equal(h.room().dev, -2);
   assert.equal(h.room().vol.v, -2);
   assert.equal(h.room().ui.msg.kind, "set");
-  assert.equal(h.run("S.unlock"), false, "the unlock relocks once the volume settles");
-  assert.match(h.run("S.unlockNote"), /Locked again/);
+  assert.equal(h.run("S.unlock"), true, "settling doesn't relock: the unlock runs to the cap");
+  h.drag(-1.5);                             // resumed after the pause, within the cap
+  assert.equal(h.room().ui.err, "");
+  h.t.advance(3000);                        // flush at 6.1 s, write at 7.8 s
+  assert.equal(h.room().dev, -1.5);
+  assert.equal(h.run("S.unlock"), true);
+  h.t.advance(60000 - 8800);                // to t = 60 s
+  assert.equal(h.run("S.unlock"), false);
+  assert.match(h.run("S.unlockNote"), /ran out after 60 s/);
 });
 
-test("once the volume has settled, a later drag needs the unlock again (interpretation to confirm)", () => {
+test("leaving the room ends the unlock and cancels a queued change", () => {
   const h = open();
   h.unlock(true);
   h.drag(-5);
-  h.t.advance(2010);                        // flush at 0.3 s, read at 1.2 s, write at 2.0 s
-  assert.equal(h.room().vol.v, -5);
+  h.t.advance(300);                         // -5 is in flight
+  h.drag(-4);                               // -4 queued behind it
+  h.run(`onAct("back", { dataset: {} })`);
   assert.equal(h.run("S.unlock"), false);
-  h.t.advance(2000);
-  h.drag(-4);
-  assert.match(h.room().ui.err, /Allow above/);
+  assert.equal(h.run("S.view"), "list");
+  assert.equal(h.run("S.rooms.find((x) => x.id === 'office').ui.want"), null);
+  assert.match(h.doc.els.get("#live").textContent, /may still land/);
+  h.t.advance(3000);
+  assert.equal(h.run("S.rooms.find((x) => x.id === 'office').dev"), -32);
+});
+
+test("leaving the room with a change only queued sends nothing", () => {
+  const h = open();
+  h.unlock(true);
+  h.drag(-5);                               // queued, not yet flushed
+  h.run(`onAct("signout", { dataset: {} })`);
+  assert.equal(h.run("S.view"), "signin");
+  h.t.advance(3000);
+  assert.equal(h.run("S.rooms.find((x) => x.id === 'office').dev"), -32);
+  assert.equal(h.run("S.unlock"), false);
 });
 
 test("a write checked after the 60 s cap is refused, and so is a later louder change", () => {

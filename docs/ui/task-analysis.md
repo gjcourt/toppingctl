@@ -156,8 +156,8 @@ reachability must be reported per host.
 3. **How does unlocking above −10 dB work?**
    - (a) A checkbox in the room view that covers one change and re-locks after Send or Cancel.
      *(the prototype's default in r1. Prototype r2 adds a 60 s timeout.)* *Note (TOPPINGCTL-10, 2026-11-01): for volume, the answer is now "one gesture,
-     ≤ 60 s": the checkbox covers a burst of changes until the volume settles, and times out at
-     60 s. See decision 13 in the [architecture plan](../plans/2026-10-26-web-ui-architecture-plan.md).*
+     ≤ 60 s": the checkbox covers a burst of changes until the 60 s cap, Cancel, or leaving the room
+     (George, 2026-11-02: a pause after the volume settles doesn't relock it). See decision 13 in the [architecture plan](../plans/2026-10-26-web-ui-architecture-plan.md).*
    - (b) Type the target in dB to confirm, like typing a repo name to delete it.
    - (c) Not available in the web UI at all. Loud levels only via the CLI's `--force`.
 4. **How does the UI reach each room's DAC?**

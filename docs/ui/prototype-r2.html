@@ -13,8 +13,8 @@
   Volume changes send without a preview: the UI shows the target at once, sends
   the latest target after 300 ms of quiet, keeps one write in flight per room,
   and the (simulated) agent re-reads the device before each write. The -10 dB
-  unlock is a checkbox for one gesture: a burst of changes until the volume
-  settles, at most 60 s. Presets and power keep the preview bar.
+  unlock is a checkbox for one gesture, at most 60 s: it ends at the cap, on
+  Cancel, or on leaving the room. Presets and power keep the preview bar.
 -->
 <style>
   :root {
@@ -352,9 +352,6 @@ function settle(r, res) {
     r.ui.want = null;               // input typed against the old value is dropped
     clearTimeout(r.ui.timer); r.ui.timer = null;
   }
-  if (S.unlock && S.rooms.every((x) => x.ui.flight === null && x.ui.want === null)) {
-    relock(); S.unlockNote = "Locked again: the volume has settled.";
-  }
   refreshVolume();
   say(plain(statusHtml(r)));
 }
@@ -472,7 +469,7 @@ function refreshVolume() {
   $("#vol-status").innerHTML = statusHtml(r);
   $("#unlock").checked = S.unlock;
   $("#unlock-note").textContent = S.unlock
-    ? `Unlocked for this gesture. It locks when the volume settles, on Cancel, or in ${S.unlockLeft} s.`
+    ? `Unlocked for this gesture. It locks on Cancel, when you leave the room, or in ${S.unlockLeft} s.`
     : S.unlockNote;
   $("#tgt-err").textContent = S.typedErr;
 }
@@ -664,13 +661,20 @@ function openRoom(id) {
   S.pending = null; S.toast = null; S.typed = ""; S.typedErr = "";
 }
 
+function leaveRoom(r) {
+  if (r && r.ui.want !== null) cancelVol(r);
+  relock();
+  if (r && r.ui.flight !== null) say(`Left ${r.name}. A write already being sent may still land.`);
+  S.view = "list"; S.room = null; clearPending(); S.toast = null;
+}
+
 function onAct(act, el) {
   const r = room();
   switch (act) {
     case "signin": S.view = "list"; break;
-    case "signout": relock(); S.view = "signin"; S.room = null; clearPending(); break;
+    case "signout": leaveRoom(r); S.view = "signin"; break;
     case "open": openRoom(el.dataset.id); break;
-    case "back": relock(); S.view = "list"; S.room = null; clearPending(); S.toast = null; break;
+    case "back": leaveRoom(r); break;
     case "read": return readVol(r);
     case "step": request(r, displayed(r) + Number(el.dataset.dir) * stepOf(r)); return;
     case "typed": return typedSet(r);
