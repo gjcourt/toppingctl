@@ -888,14 +888,15 @@ class SharedHandleReadTest(unittest.TestCase):
     def test_read_write_read_back_is_one_open(self):
         h = toppingctl.open_checked("dx5ii")
         try:
-            devstate.read_settings(secs=0.1, h=h)
+            before = devstate.read_settings(secs=0.1, h=h)
             h.write(toppingctl.frame(toppingctl.REG_CTRL, toppingctl.SUB_VOLUME, 60))
-            devstate.read_settings(secs=0.1, h=h)
+            after = devstate.read_settings(secs=0.1, h=h)
         finally:
             h.close()
         self.assertEqual(len(self.opens), 1)
         self.assertEqual(self.closes, [h])
-        self.assertEqual(len(self.writes), 3)
+        self.assertEqual((before, after), ({32: 1}, {32: 1}))
+        self.assertEqual([w[5:7] for w in self.writes], [b"\x71\x0c", b"\x71\x02", b"\x71\x0c"])
 
     def test_a_passed_handle_with_no_reply_still_raises(self):
         h = toppingctl.open_checked("dx5ii")

@@ -172,7 +172,7 @@ def dx1_state(dev_key="dx1ii", *, skip_peq_dump=False):
         h.close()
 
 
-def read_settings(dev_key="dx5ii", secs=2.0, h=None):
+def read_settings(dev_key="dx5ii", secs=2.0, *, h=None):
     """Query the device and return {index: raw_value}.
 
     With h, read through that already-open handle and leave it open, so one
