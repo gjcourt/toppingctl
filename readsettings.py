@@ -5,7 +5,7 @@ import argparse
 import math
 
 import devstate
-from toppingctl import DEVICES, DX1_F_MUTE
+from toppingctl import DEVICES, DX1_F_MUTE, cli_device_lock
 from vendor_commands import (
     ENUMS,
     FIELD_ENUM,
@@ -114,54 +114,63 @@ def dx1_show(st):
             print("    " + "  ".join(active))
 
 
-# devstate owns the read: it retries when another client holds the device and
-# tolerates the hid wrapper raising on benign zero-length reports.
-ap = argparse.ArgumentParser(description=__doc__)
-ap.add_argument("--device", default="dx5ii")
-dev_key = ap.parse_args().device
+def main():
+    # devstate owns the read: it retries when another client holds the device and
+    # tolerates the hid wrapper raising on benign zero-length reports.
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--device", default="dx5ii")
+    dev_key = ap.parse_args().device
 
-if DEVICES[dev_key].get("protocol") == "dx1":
-    dx1_show(devstate.dx1_state(dev_key))
-    raise SystemExit(0)
+    dx1 = DEVICES[dev_key].get("protocol") == "dx1"
+    with cli_device_lock(write=False):
+        if dx1:
+            st = devstate.dx1_state(dev_key)
+        else:
+            rec = devstate.read_settings(dev_key, secs=3.0)
+    if dx1:
+        dx1_show(st)
+        return
 
-rec = devstate.read_settings(dev_key, secs=3.0)
+    name = b"".join(rec.get(i, 0).to_bytes(4, "big")[::-1] for i in range(1, 9))
+    # Extracted rather than inlined: nested same-type quotes inside an f-string
+    # are PEP 701, which needs Python >= 3.12. The audio nodes this runs on ship
+    # Python 3.11, and CI only tested 3.14, so the incompatibility stayed
+    # invisible until the tool was actually run on one.
+    dev_name = name.split(b"\x00")[0].decode("ascii", "replace").strip()
+    print(f"device      {dev_name}")
+    print(
+        f"records     {len(rec)}  (firmware >= 2.40 adds 48..51: "
+        f"{'yes' if max(rec, default=0) >= 48 else 'no'})\n"
+    )
+    for i in sorted(rec):
+        if i in range(1, 9):
+            continue
+        f = SETTINGS_FIELDS.get(i, f"idx{i}")
+        v = rec[i]
+        extra = ""
+        if f == "volume":
+            # The raw unit is NOT fixed: volumeStep (field 32) selects it.
+            # Measured on a DX5 II, 2026-08-27, against the front panel:
+            #   half_db: raw 60 -> -30.0 dB, raw 55 -> -27.5 dB   (0.5 dB/unit)
+            #   one_db:  raw 25 -> -25.0 dB                       (1.0 dB/unit)
+            # Hardcoding /2 reported -12.5 dB while the panel read -25.0.
+            extra = f"   = {-v * volume_step_db(rec):+.1f} dB"
+        elif f.endswith("Mask"):
+            extra = f"   = 0b{v:b}  ({bin(v).count('1')} options)"
+        elif f in ("powered", "muted", "highGain", "bluetoothAptx", "remoteEnabled"):
+            extra = f"   = {bool(v)}"
+        elif f == "balance":
+            extra = f"   = {decode_balance(v)}"
+        elif f == "sampleRate":
+            extra = f"   = {decode_sample_rate(v)}"
+        elif f == "dcDetectSensitivity":
+            extra = f"   = {'high' if v else 'low'}"
+        elif i in (45, 46, 47):
+            extra = f"   = version {decode_version(v)}"
+        elif f in FIELD_ENUM:
+            extra = f"   = {ENUMS[FIELD_ENUM[f]].get(v, '?')}"
+        print(f"  [{i:2d}] {f:<32} {v:<6}{extra}")
 
-name = b"".join(rec.get(i, 0).to_bytes(4, "big")[::-1] for i in range(1, 9))
-# Extracted rather than inlined: nested same-type quotes inside an f-string
-# are PEP 701, which needs Python >= 3.12. The audio nodes this runs on ship
-# Python 3.11, and CI only tested 3.14, so the incompatibility stayed
-# invisible until the tool was actually run on one.
-dev_name = name.split(b"\x00")[0].decode("ascii", "replace").strip()
-print(f"device      {dev_name}")
-print(
-    f"records     {len(rec)}  (firmware >= 2.40 adds 48..51: "
-    f"{'yes' if max(rec, default=0) >= 48 else 'no'})\n"
-)
-for i in sorted(rec):
-    if i in range(1, 9):
-        continue
-    f = SETTINGS_FIELDS.get(i, f"idx{i}")
-    v = rec[i]
-    extra = ""
-    if f == "volume":
-        # The raw unit is NOT fixed: volumeStep (field 32) selects it.
-        # Measured on a DX5 II, 2026-08-27, against the front panel:
-        #   half_db: raw 60 -> -30.0 dB, raw 55 -> -27.5 dB   (0.5 dB/unit)
-        #   one_db:  raw 25 -> -25.0 dB                       (1.0 dB/unit)
-        # Hardcoding /2 reported -12.5 dB while the panel read -25.0.
-        extra = f"   = {-v * volume_step_db(rec):+.1f} dB"
-    elif f.endswith("Mask"):
-        extra = f"   = 0b{v:b}  ({bin(v).count('1')} options)"
-    elif f in ("powered", "muted", "highGain", "bluetoothAptx", "remoteEnabled"):
-        extra = f"   = {bool(v)}"
-    elif f == "balance":
-        extra = f"   = {decode_balance(v)}"
-    elif f == "sampleRate":
-        extra = f"   = {decode_sample_rate(v)}"
-    elif f == "dcDetectSensitivity":
-        extra = f"   = {'high' if v else 'low'}"
-    elif i in (45, 46, 47):
-        extra = f"   = version {decode_version(v)}"
-    elif f in FIELD_ENUM:
-        extra = f"   = {ENUMS[FIELD_ENUM[f]].get(v, '?')}"
-    print(f"  [{i:2d}] {f:<32} {v:<6}{extra}")
+
+if __name__ == "__main__":
+    main()

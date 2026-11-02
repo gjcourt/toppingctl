@@ -44,6 +44,7 @@ from toppingctl import (
     VOL_WARN_DB,
     Device,
     assert_writable,
+    cli_device_lock,
     dx1_raw_to_db,
     frame,
 )
@@ -190,7 +191,12 @@ def main():
     a = ap.parse_args()
 
     if a.device == "dx1ii":
-        return recall_dx1(a)
+        if a.dry_run:
+            return recall_dx1(a)
+        # The recall writes 0x7800, and the push that follows is read under
+        # the same lock.
+        with cli_device_lock(write=True):
+            return recall_dx1(a)
     if a.device != "dx5ii":
         ap.error(f"scene recall is mapped for dx5ii and dx1ii only, not {a.device!r}")
     if a.slot not in RECALL:
@@ -198,7 +204,14 @@ def main():
 
     cmd = RECALL[a.slot]
     print(f"  {COMMANDS.get(cmd, '?')} (0x{cmd:04x})")
+    if a.dry_run:
+        return recall(a, cmd)
+    # One lock across the before read, the recall and the after read.
+    with cli_device_lock(write=True):
+        return recall(a, cmd)
 
+
+def recall(a, cmd):
     before = {} if a.dry_run else devstate.by_name()
     dev = Device(a.dry_run, None)
     dev.send(frame(cmd >> 8, cmd & 0xFF, 1), f"recall {a.slot}")
