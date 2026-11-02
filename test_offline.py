@@ -841,6 +841,103 @@ class VolumeStepFromDeviceTest(unittest.TestCase):
         self.assertIn("volume -30.0 dB  (raw 60)", out)
 
 
+class SharedHandleReadTest(unittest.TestCase):
+    """TOPPINGCTL-5: read_settings reads through a passed-in handle, so one
+    operation (read, write, read-back) is one open. A fake hid.Device counts
+    its opens and closes; every open answers GetSettings once."""
+
+    def setUp(self):
+        self.writes, self.opens, self.closes = [], [], []
+        test = self
+
+        class Handle(_make_fake_hid(self.writes)):
+            def __init__(self, *a, **kw):
+                test.opens.append(self)
+                self.reply = []
+
+            def write(self, data):
+                super().write(data)
+                if bytes(data)[5:7] == bytes(devstate.GET_SETTINGS):
+                    self.reply.append(_settings_record(32, 1))
+                return len(data)
+
+            def read(self, *a, **kw):
+                return self.reply.pop() if self.reply else b""
+
+            def close(self):
+                test.closes.append(self)
+
+        self.Handle = Handle
+        for p in (
+            mock.patch.object(toppingctl.hid, "Device", Handle),
+            mock.patch.object(toppingctl.hid, "enumerate", _fake_enumerate("DX5II")),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_without_a_handle_it_opens_and_closes_its_own(self):
+        self.assertEqual(devstate.read_settings("dx5ii", secs=0.1), {32: 1})
+        self.assertEqual((len(self.opens), len(self.closes)), (1, 1))
+
+    def test_a_passed_handle_is_used_and_left_open(self):
+        h = toppingctl.open_checked("dx5ii")
+        self.assertEqual(devstate.read_settings(secs=0.1, h=h), {32: 1})
+        self.assertEqual(self.opens, [h])
+        self.assertEqual(self.closes, [])
+
+    def test_read_write_read_back_is_one_open(self):
+        h = toppingctl.open_checked("dx5ii")
+        try:
+            devstate.read_settings(secs=0.1, h=h)
+            h.write(toppingctl.frame(toppingctl.REG_CTRL, toppingctl.SUB_VOLUME, 60))
+            devstate.read_settings(secs=0.1, h=h)
+        finally:
+            h.close()
+        self.assertEqual(len(self.opens), 1)
+        self.assertEqual(self.closes, [h])
+        self.assertEqual(len(self.writes), 3)
+
+    def test_a_passed_handle_with_no_reply_still_raises(self):
+        h = toppingctl.open_checked("dx5ii")
+        h.write = lambda data: len(data)  # swallow the request: no reply
+        with self.assertRaises(RuntimeError):
+            devstate.read_settings(secs=0.1, h=h)
+        self.assertEqual(self.closes, [])
+
+
+class Dx1StateSkipPeqDumpTest(unittest.TestCase):
+    """TOPPINGCTL-5: the agent reads the DX1 II with skip_peq_dump=True, so
+    it never sends 11 06 -- that register's read-safety is an unmeasured
+    contributor claim (PR #25), and it is not in CONFIRMED_READS."""
+
+    def read(self, **kw):
+        writes = []
+        handle = _make_fake_hid(writes)()
+        with (
+            mock.patch.object(devstate, "open_checked", lambda key: handle),
+            mock.patch.object(devstate, "_frames", lambda h, secs: []),
+        ):
+            st = devstate.dx1_state("dx1ii", **kw)
+        return st, {(w[6], w[7]) for w in writes}  # report-id prefixed
+
+    def test_skip_mode_never_sends_11_06(self):
+        st, sent = self.read(skip_peq_dump=True)
+        self.assertNotIn((0x11, 0x06), sent)
+        self.assertLessEqual(sent, toppingctl.CONFIRMED_READS["dx1ii"])
+        self.assertEqual(sent, set(devstate.DX1_STATE_QUERIES) | {(0x81, 0x0A)})
+        self.assertIsNone(st["configs"])
+
+    def test_default_still_reads_the_dump(self):
+        st, sent = self.read()
+        self.assertIn((0x11, 0x06), sent)
+        self.assertEqual(st["configs"], [])
+
+    def test_show_says_the_dump_was_not_read(self):
+        st = {"block": {}, "regs": {}, "configs": None}
+        out = run_quietly(load_dx1_show(), st)
+        self.assertIn("not read (0x1106 dump skipped)", out)
+
+
 class Dx1EqOnLiveTest(unittest.TestCase):
     """Live `eq on` reads the active slot (0x1206) through devstate, then
     writes it to 0x110e -- the path --dry-run deliberately skips."""

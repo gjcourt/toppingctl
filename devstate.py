@@ -147,28 +147,40 @@ DX1_STATE_QUERIES = {
 }
 
 
-def dx1_state(dev_key="dx1ii"):
+def dx1_state(dev_key="dx1ii", *, skip_peq_dump=False):
     """Everything the DX1 II will safely say about itself, decoded by
     readsettings. Queries are restricted to the vendor's read-safe register
     list (DX1_VENDOR_READ_SAFE; see dx1_query -- anything else turns the
     readNack into a write of the data field and clobbers the user's
     settings), plus the unverified 0x1106 dump. The write-only registers
     (gain, filter, brightness, input, display mode, ...) are deliberately
-    absent: their state only arrives as an unsolicited push."""
+    absent: their state only arrives as an unsolicited push.
+
+    skip_peq_dump=True leaves out the 0x1106 dump, so every frame sent is on
+    the vendor's list (CONFIRMED_READS). "configs" is then None -- not read,
+    as opposed to [] for a dump that returned nothing. The agent always
+    skips it: 0x1106's read-safety is one contributor's unmeasured claim."""
     h = open_checked(dev_key)
     try:
         blk = dx1_read_block(h)
         regs = {}
         for (reg, sub), name in DX1_STATE_QUERIES.items():
             regs[name] = dx1_query(h, reg, sub)
-        configs = dx1_read_configs(h)
+        configs = None if skip_peq_dump else dx1_read_configs(h)
         return {"block": blk, "regs": regs, "configs": configs}
     finally:
         h.close()
 
 
-def read_settings(dev_key="dx5ii", secs=2.0):
-    """Query the device and return {index: raw_value}."""
+def read_settings(dev_key="dx5ii", secs=2.0, h=None):
+    """Query the device and return {index: raw_value}.
+
+    With h, read through that already-open handle and leave it open, so one
+    operation (read, write, read-back) is one open of a device that grants
+    only one handle. dev_key is then unused: the caller opened h, through
+    open_checked, for the model it meant. Without h, open one and close it."""
+    if h is not None:
+        return _read_settings(h, secs)
     # Opening can fail transiently when something else holds the device -- the
     # vendor web app claims it over WebHID, and only one client gets it. The
     # device is still enumerated, so this is contention, not absence.
@@ -181,33 +193,38 @@ def read_settings(dev_key="dx5ii", secs=2.0):
                 raise
             time.sleep(0.4)
     try:
-        h.write(frame(*GET_SETTINGS, 0, opcode=0x10))
-        rec, t0 = {}, time.time()
-        while time.time() - t0 < secs:
-            try:
-                b = h.read(64, timeout=200)
-            except Exception:
-                # The hid wrapper raises HIDException("Success") on a benign
-                # zero-length read. It is noise, not a failure -- the device
-                # streams empty reports when it has nothing to say.
-                continue
-            if (
-                b
-                and len(b) >= 15
-                and b[0] == 0x22
-                and b[1] == 0x33
-                and b[5] == GET_SETTINGS[0]
-                and b[6] == GET_SETTINGS[1]
-            ):
-                rec[b[4]] = int.from_bytes(bytes(b[7:11]), "big")
-        if not rec:
-            raise RuntimeError(
-                "device returned no settings records -- a timeout or a lost "
-                "handle, not a missing field. Retry."
-            )
-        return rec
+        return _read_settings(h, secs)
     finally:
         h.close()
+
+
+def _read_settings(h, secs):
+    """GetSettings over an open handle -> {index: raw_value}."""
+    h.write(frame(*GET_SETTINGS, 0, opcode=0x10))
+    rec, t0 = {}, time.time()
+    while time.time() - t0 < secs:
+        try:
+            b = h.read(64, timeout=200)
+        except Exception:
+            # The hid wrapper raises HIDException("Success") on a benign
+            # zero-length read. It is noise, not a failure -- the device
+            # streams empty reports when it has nothing to say.
+            continue
+        if (
+            b
+            and len(b) >= 15
+            and b[0] == 0x22
+            and b[1] == 0x33
+            and b[5] == GET_SETTINGS[0]
+            and b[6] == GET_SETTINGS[1]
+        ):
+            rec[b[4]] = int.from_bytes(bytes(b[7:11]), "big")
+    if not rec:
+        raise RuntimeError(
+            "device returned no settings records -- a timeout or a lost "
+            "handle, not a missing field. Retry."
+        )
+    return rec
 
 
 def by_name(dev_key="dx5ii", secs=2.0):
