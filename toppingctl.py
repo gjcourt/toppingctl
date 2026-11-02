@@ -357,6 +357,12 @@ DX1_REG_INPUT = (0x7B, 0x00)  # input, 0 = usb, 1 = optical
 DX1_REG_SWITCH_CFG = (0x11, 0x0E)  # select PEQ slot 0..2; 0xffffffff = EQ off
 DX1_REG_QUERY_CFG = (0x12, 0x06)  # read back active PEQ slot (0..2)
 DX1_REG_QUERY_ENABLE = (0x12, 0x04)  # read back EQ enable bits (bit1 = on)
+# Scene recall: data 1..3 = C1..C3. The device flashes the slot on the front
+# panel and pushes 0x7800 back with the slot, then the settings the scene set.
+# Not readable: 0x7800 is not on the read-safe list, so the current scene
+# can't be queried. Driven on a DX1 II, 2026-10-31 (V16.13.23.13 in TOPPING
+# Home, 0x0307).
+DX1_REG_SCENE = (0x78, 0x00)
 
 # The registers a readNack may be sent to on this model, as (reg, sub). The
 # vendor bundle's requestGroup builder allows exactly these; for any other
