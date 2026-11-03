@@ -93,7 +93,7 @@ test("a drag that pauses above -10 dB keeps the unlock and sends the rest of the
   h.t.advance(100);
   h.drag(-2);
   h.t.advance(2000);
-  assert.equal(h.run("S.unlock"), true, "still in the gesture while -2 is in flight");
+  assert.equal(h.run("S.unlock"), true, "still unlocked while -2 is in flight");
   h.t.advance(1500);
   assert.equal(h.room().dev, -2);
   assert.equal(h.room().vol.v, -2);

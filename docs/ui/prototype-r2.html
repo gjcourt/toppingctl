@@ -13,7 +13,7 @@
   Volume changes send without a preview: the UI shows the target at once, sends
   the latest target after 300 ms of quiet, keeps one write in flight per room,
   and the (simulated) agent re-reads the device before each write. The -10 dB
-  unlock is a checkbox for one gesture, at most 60 s: it ends at the cap, on
+  unlock is a checkbox that lasts 60 s: it ends at the cap, on
   Cancel, or on leaving the room. Presets and power keep the preview bar.
 -->
 <style>
@@ -419,7 +419,7 @@ function volumeCard(r, w) {
     <div id="tgt-err" class="err">${esc(S.typedErr)}</div>
     <div id="vol-status"></div>
     <label class="check"><input type="checkbox" id="unlock" ${S.unlock ? "checked" : ""}>
-      <span>Allow above ${MINUS}10 dB for one gesture, up to 60 s${r.output.hp ? " <strong>(output is headphones)</strong>" : ""}</span></label>
+      <span>Allow above ${MINUS}10 dB for 60 s${r.output.hp ? " <strong>(output is headphones)</strong>" : ""}</span></label>
     <div id="unlock-note" class="why"></div>`;
 }
 
@@ -461,7 +461,7 @@ function refreshVolume() {
   slider.value = shown;
   slider.setAttribute("aria-valuetext", db(shown));
   const loudSending = r.ui.flight !== null && r.ui.flight > SAFE_MAX;
-  $("#vol-cap").textContent = loudSending ? "loud send in progress" : S.unlock ? "unlocked for this gesture" : cap > SAFE_MAX ? `now ${db(cap)}, quieter only` : `${MINUS}10 dB limit`;
+  $("#vol-cap").textContent = loudSending ? "loud send in progress" : S.unlock ? `unlocked, ${S.unlockLeft} s left` : cap > SAFE_MAX ? `now ${db(cap)}, quieter only` : `${MINUS}10 dB limit`;
   $("#vol-down").disabled = step === null || shown - step < VOL_MIN;
   $("#vol-up").disabled = step === null || shown + step > cap;
   $("#vol-step-note").textContent = step === null
@@ -470,7 +470,7 @@ function refreshVolume() {
   $("#vol-status").innerHTML = statusHtml(r);
   $("#unlock").checked = S.unlock;
   $("#unlock-note").textContent = S.unlock
-    ? `Unlocked for this gesture. It locks on Cancel, when you leave the room, or in ${S.unlockLeft} s.`
+    ? `Allowed above ${MINUS}10 dB for ${S.unlockLeft} more s. It locks at the cap, on Cancel, or when you leave the room.`
     : S.unlockNote;
   $("#tgt-err").textContent = S.typedErr;
 }
@@ -612,7 +612,7 @@ function sendPending() {
       render(`[data-act="send"]`); say(plain(S.toast.html)); return;
     }
     S.pending = null; S.said = null;
-    if (loud && S.rooms.every((x) => x.ui.flight === null && x.ui.want === null)) relock();  // a volume gesture in progress keeps the checkbox
+    if (loud && S.rooms.every((x) => x.ui.flight === null && x.ui.want === null)) relock();  // a volume change in progress keeps the checkbox
     if (p.kind === "preset") {
       r.preset = { v: p.to, src: "written", age: "just now" };
       if (to.pre !== null) r.preamp = { v: to.pre, src: "written", age: "just now" };

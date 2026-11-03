@@ -73,9 +73,10 @@ Interpretations taken with decision 13, to confirm or change:
 - **"Quieter" means quieter than the level the device last reported** (the read the agent takes
   before the write). A target at or below that level is always allowed. A target above −10 dB
   and not quieter than that level needs the unlock.
-- **One unlock covers one gesture: "One gesture, ≤ 60 s"** (George, 2026-11-01; run to the cap,
-  George, 2026-11-02). The unlock runs until the 60 s cap, Cancel, leaving the room or signing out,
-  or unticking the box. Settling and pausing don't relock it: a drag that resumes within the cap is
+- **One unlock lasts 60 s: "One gesture, ≤ 60 s"** (George, 2026-11-01; run to the cap,
+  George, 2026-11-02). The checkbox reads "Allow above −10 dB for 60 s" (George, 2026-11-03), with
+  the countdown in the note. The unlock runs until the 60 s cap, Cancel, leaving the room or signing
+  out, or unticking the box. Settling and pausing don't relock it: a drag that resumes within the cap is
   allowed without ticking the box again. Leaving the room or signing out also cancels a queued
   volume change that hasn't been sent, and says so if a write already in flight may still land.
 - **A queued target is dropped when the write in flight fails or is refused.** The UI shows the
@@ -89,8 +90,8 @@ Interpretations taken with decision 13, to confirm or change:
   `volumeStep` per step is gone, so a typed jump of any size is a single write.
 - **Presets, sleep and wake keep the existing preview bar**, unchanged.
 - **One checkbox, two objects.** A loud preset send uses the unlock and relocks the checkbox, but
-  only when no volume change is in flight or queued in any room, so a preset never ends a volume
-  gesture.
+  only when no volume change is in flight or queued in any room, so a preset never ends an open
+  volume change.
 
 ### Answers to this plan's questions (George, 2026-10-26, ticket comment)
 
@@ -443,7 +444,7 @@ and mute was never driven. Both tables are code constants, not config.
 | **Input, output and mute: read-only for now** (decision 1) | They are absent from the write list for **every** model, including the DX5 II, until a hardware-confirmation ticket marks each one confirmed in code |
 | **Scene recall: out of the web build for now** (Q15) | No `scene.recall` operation exists, and `71 11`/`71 12` aren't in `CONFIRMED_WRITES`. A later ticket confirms recall on the front panel, then adds the feature with decision 2's guard (the unlock, plus "Lower to −30 dB" after a loud result) |
 | **Volume above −10 dB needs an explicit force** | A plan whose result is above −10 dB is refused unless the Send request carries `allow_loud: true` for that plan. A volume write (no plan) above −10 dB is refused unless it is not louder than the fresh read, or carries a live `unlock_id` (decision 13). The agent checks **both** the requested level and the level after quantising to the device's step. `cmd_vol` today checks only the requested `db`, which is safe with Python's `round` but should be explicit |
-| **The unlock covers one gesture, until the 60 s cap, Cancel, leaving the room or signing out** (decision 3, Q5, "One gesture, ≤ 60 s") | For a plan, `allow_loud` lives on that plan alone, not a session or a room. The plan is single-use and expires 60 s after it is created. Cancelling, expiring, sending, or a Send rejected with `409 changed` all discard it. For a volume write, the unlock is a separate object: `POST /v1/unlocks` returns an `unlock_id` that expires 60 s after it is created. A volume write with a live `unlock_id` is accepted above −10 dB and doesn't consume it, so a pause in a drag doesn't end the gesture. `DELETE /v1/unlocks/{id}` discards it, and so does a `409`. The UI keeps the checkbox on, and sends the `unlock_id` with each volume write, until the 60 s cap, Cancel, leaving the room or signing out, or unticking the box. Settling and pausing don't end it. On Cancel, leaving, or unticking, the UI calls DELETE and the checkbox relocks; leaving also cancels a queued volume change, and says so if a write in flight may still land. The agent checks the unlock when it runs each write, not when the UI queued it, so a write that is checked after the 60 s cap is refused |
+| **The unlock lasts 60 s: it ends at the cap, on Cancel, leaving the room or signing out** (decision 3, Q5, "One gesture, ≤ 60 s") | For a plan, `allow_loud` lives on that plan alone, not a session or a room. The plan is single-use and expires 60 s after it is created. Cancelling, expiring, sending, or a Send rejected with `409 changed` all discard it. For a volume write, the unlock is a separate object: `POST /v1/unlocks` returns an `unlock_id` that expires 60 s after it is created. A volume write with a live `unlock_id` is accepted above −10 dB and doesn't consume it, so a pause in a drag doesn't end the gesture. `DELETE /v1/unlocks/{id}` discards it, and so does a `409`. The UI keeps the checkbox on, and sends the `unlock_id` with each volume write, until the 60 s cap, Cancel, leaving the room or signing out, or unticking the box. Settling and pausing don't end it. On Cancel, leaving, or unticking, the UI calls DELETE and the checkbox relocks; leaving also cancels a queued volume change, and says so if a write in flight may still land. The agent checks the unlock when it runs each write, not when the UI queued it, so a write that is checked after the 60 s cap is refused |
 | **High gain is treated like the unlock** (decision 8) | A plan that switches gain on is "loud" and needs `allow_loud`. Switching it off needs only the normal preview |
 | **A preset that raises the preamp needs the unlock if volume + rise > −10 dB** (decision 12, Q7) | The agent computes `rise = new_preamp − last_written_preamp` and requires `allow_loud` if `volume + rise > −10`. If nothing was ever written, the rise is unknown and counts as loud. A preset that declares no preamp leaves `0x9c` alone (`cmd_apply`), so its largest positive band gain counts as the rise. The last-written value can be wrong if the vendor app changed the preamp since. The preview says the base is "last written by toppingctl" |
 | **"Lower to −30 dB" sends at once** (design rule 5) | An ordinary volume write. It needs no unlock, because the agent reads the device in the same operation and finds the level louder than the target. In step 4 the UI offers it whenever a read shows the room above −10 dB, for example after the knob was turned up. In step 6 it also appears after a loud wake (Q13) |
