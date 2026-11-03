@@ -4,6 +4,7 @@
 import time
 
 from toppingctl import (
+    CONFIRMED_READS,
     DX1_BLOCK_LEN,
     DX1_OUT_STATE,
     DX1_READ_REGS,
@@ -156,8 +157,8 @@ def dx1_state(dev_key="dx1ii", *, skip_peq_dump=False):
     (gain, filter, brightness, input, display mode, ...) are deliberately
     absent: their state only arrives as an unsolicited push.
 
-    skip_peq_dump=True leaves out the 0x1106 dump, so every frame sent is on
-    the vendor's list (CONFIRMED_READS). "configs" is then None -- not read,
+    skip_peq_dump=True leaves out the 0x1106 dump, so every frame sent is in
+    CONFIRMED_READS. "configs" is then None -- not read,
     as opposed to [] for a dump that returned nothing. The agent always
     skips it: 0x1106's read-safety is one contributor's unmeasured claim."""
     h = open_checked(dev_key)
@@ -177,8 +178,17 @@ def read_settings(dev_key="dx5ii", secs=2.0, *, h=None):
 
     With h, read through that already-open handle and leave it open, so one
     operation (read, write, read-back) is one open of a device that grants
-    only one handle. dev_key is then unused: the caller opened h, through
-    open_checked, for the model it meant. Without h, open one and close it."""
+    only one handle. Pass the model's real dev_key with it: that is what the
+    guard below checks. Without h, open one and close it.
+
+    Refuses, before sending anything, a model whose CONFIRMED_READS lacks
+    GetSettings. On the DX1 II a readNack to an unlisted register is a
+    WRITE of its data field (see dx1_query), and 0x710c is not listed."""
+    if GET_SETTINGS not in CONFIRMED_READS.get(dev_key, ()):
+        raise Refused(
+            f"refusing GetSettings ({GET_SETTINGS[0]:02x} {GET_SETTINGS[1]:02x}) on "
+            f"{dev_key}: not in CONFIRMED_READS for that model."
+        )
     if h is not None:
         return _read_settings(h, secs)
     # Opening can fail transiently when something else holds the device -- the

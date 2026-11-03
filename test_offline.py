@@ -881,16 +881,16 @@ class SharedHandleReadTest(unittest.TestCase):
 
     def test_a_passed_handle_is_used_and_left_open(self):
         h = toppingctl.open_checked("dx5ii")
-        self.assertEqual(devstate.read_settings(secs=0.1, h=h), {32: 1})
+        self.assertEqual(devstate.read_settings("dx5ii", secs=0.1, h=h), {32: 1})
         self.assertEqual(self.opens, [h])
         self.assertEqual(self.closes, [])
 
     def test_read_write_read_back_is_one_open(self):
         h = toppingctl.open_checked("dx5ii")
         try:
-            before = devstate.read_settings(secs=0.1, h=h)
+            before = devstate.read_settings("dx5ii", secs=0.1, h=h)
             h.write(toppingctl.frame(toppingctl.REG_CTRL, toppingctl.SUB_VOLUME, 60))
-            after = devstate.read_settings(secs=0.1, h=h)
+            after = devstate.read_settings("dx5ii", secs=0.1, h=h)
         finally:
             h.close()
         self.assertEqual(len(self.opens), 1)
@@ -902,8 +902,22 @@ class SharedHandleReadTest(unittest.TestCase):
         h = toppingctl.open_checked("dx5ii")
         h.write = lambda data: len(data)  # swallow the request: no reply
         with self.assertRaises(RuntimeError):
-            devstate.read_settings(secs=0.1, h=h)
+            devstate.read_settings("dx5ii", secs=0.1, h=h)
         self.assertEqual(self.closes, [])
+
+    def test_a_dx1ii_handle_is_refused_before_anything_is_sent(self):
+        # 0x710c isn't on the DX1 II read list, where a readNack is a write.
+        h = toppingctl.open_checked("dx5ii")
+        with self.assertRaises(toppingctl.Refused):
+            devstate.read_settings("dx1ii", secs=0.1, h=h)
+        self.assertEqual(self.writes, [])
+        self.assertEqual(self.closes, [])
+
+    def test_a_model_without_getsettings_is_refused_before_opening(self):
+        for key in ("dx1ii", "d90iii", "nosuchmodel"):
+            with self.subTest(key), self.assertRaises(toppingctl.Refused):
+                devstate.read_settings(key, secs=0.1)
+        self.assertEqual((self.opens, self.writes), ([], []))
 
 
 class Dx1StateSkipPeqDumpTest(unittest.TestCase):
