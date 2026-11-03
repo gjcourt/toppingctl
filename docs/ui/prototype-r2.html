@@ -174,14 +174,14 @@ function sampleRooms() {
 }
 
 let S;
-function newRoomUi() { return { want: null, flight: null, timer: null, msg: null, undoTo: null, burstBase: null, err: "", reading: false }; }
+function newRoomUi() { return { want: null, wantUnlock: null, flight: null, timer: null, msg: null, undoTo: null, burstBase: null, err: "", reading: false }; }
 function reset() {
   if (S) {
     S.rooms.forEach((r) => clearTimeout(r.ui.timer));
     clearInterval(S.unlockTimer);
   }
   S = { view: "signin", room: null, rooms: sampleRooms(), pending: null, sending: false,
-        unlock: false, unlockLeft: 0, unlockTimer: null, unlockNote: "",
+        unlock: false, unlockSeq: 0, unlockLeft: 0, unlockTimer: null, unlockNote: "",
         failNext: false, typed: "", typedErr: "", framesOpen: false, said: null, toast: null };
   S.rooms.forEach((r) => { r.ui = newRoomUi(); });
 }
@@ -300,6 +300,7 @@ function request(r, raw) {
     r.ui.msg = { kind: "none" };
   } else {
     r.ui.want = to;
+    r.ui.wantUnlock = S.unlock ? S.unlockSeq : null;
     r.ui.msg = { kind: "waiting" };
     if (r.ui.flight === null) {
       clearTimeout(r.ui.timer);
@@ -312,7 +313,7 @@ function request(r, raw) {
 function flush(r) {
   r.ui.timer = null;
   if (r.ui.flight !== null || r.ui.want === null) return;
-  const to = r.ui.want, expected = r.vol.v;
+  const to = r.ui.want, expected = r.vol.v, unlock = r.ui.wantUnlock;
   r.ui.want = null;
   r.ui.flight = to;
   r.ui.msg = { kind: "sending" };
@@ -325,7 +326,7 @@ function flush(r) {
       return settle(r, { kind: "refused", fresh, readAt,
         text: `Changed elsewhere: ${r.name} reads ${db(fresh)}, not the ${db(expected)} this change started from. Read ${r.name} again, then set the level again.` });
     }
-    const err = loudError(fresh, to, S.unlock);
+    const err = loudError(fresh, to, S.unlock && unlock === S.unlockSeq);
     if (err) return settle(r, { kind: "refused", fresh, readAt, text: err });
     setTimeout(() => {
       if (S.failNext) {
@@ -368,7 +369,7 @@ function cancelVol(r) {
 
 function setUnlock(on) {
   if (!on) { relock(); return; }
-  S.unlock = true; S.unlockLeft = UNLOCK_S; S.unlockNote = "";
+  S.unlock = true; S.unlockSeq += 1; S.unlockLeft = UNLOCK_S; S.unlockNote = "";
   clearInterval(S.unlockTimer);
   S.unlockTimer = setInterval(() => {
     S.unlockLeft -= 1;

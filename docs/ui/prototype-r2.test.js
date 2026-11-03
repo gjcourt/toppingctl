@@ -135,6 +135,20 @@ test("leaving the room with a change only queued sends nothing", () => {
   assert.equal(h.run("S.unlock"), false);
 });
 
+test("a write is refused when the unlock it was queued under is gone, even if another unlock is live", () => {
+  const h = open();
+  h.unlock(true);
+  h.drag(-5);
+  h.t.advance(300);                         // -5 is in flight, queued under this unlock
+  h.unlock(false);
+  h.run(`openRoom("living"); render();`);
+  h.unlock(true);                           // a second unlock, ticked in another room
+  assert.equal(h.run("S.unlock"), true);
+  h.t.advance(1000);                        // the agent check of the office write, at 1.2 s
+  assert.equal(h.run("S.rooms.find((x) => x.id === 'office').dev"), -32);
+  assert.equal(h.run("S.rooms.find((x) => x.id === 'office').ui.msg.kind"), "refused");
+});
+
 test("a write checked after the 60 s cap is refused, and so is a later louder change", () => {
   const h = open();
   h.unlock(true);
