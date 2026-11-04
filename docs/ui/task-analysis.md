@@ -94,7 +94,7 @@ doesn't count.
 
 | Mistake | Cost | How it could happen | What the design does |
 | --- | --- | --- | --- |
-| **Loud volume into headphones** | Irreversible: hearing, drivers | Mistyped value. A slider dragged too far. A "+" step from a stale cached value. The wrong `volumeStep` scale | The slider and steppers **stop at −10 dB**. If a room is already louder than that, they can only go quieter. Above −10 dB, a separate **"Allow above −10 dB"** control in the room view unlocks the range for **one change**, then re-locks. A "+" step needs a volume **read from the device this session**. From a cached value, only a typed absolute target is allowed, and there is no undo back to the cached value. The step size shown comes from the device read |
+| **Loud volume into headphones** | Irreversible: hearing, drivers | Mistyped value. A slider dragged too far. A "+" step from a stale cached value. The wrong `volumeStep` scale | The slider and steppers **stop at −10 dB**. If a room is already louder than that, they can only go quieter. Above −10 dB, a separate **"Allow above −10 dB"** control in the room view unlocks the range for **one change** (for volume, 60 s; see the note), then re-locks. *Note (TOPPINGCTL-10, 2026-11-01): for volume the unlock lasts 60 s and covers a burst of changes until the cap, Cancel, or leaving the room, and a pause after the volume settles doesn't relock it; see decision 13 in the [architecture plan](../plans/2026-10-26-web-ui-architecture-plan.md).* A "+" step needs a volume **read from the device this session**. From a cached value, only a typed absolute target is allowed, and there is no undo back to the cached value. The step size shown comes from the device read |
 | **Loud volume from a scene recall** | Same as above | C1 and C2 can hold any volume, and their contents can't be read before recall (`scenes.py`) | A recall needs its own "Allow above −10 dB for this change" tick in the preview. As `scenes.py` does, the state is read just before and just after the recall. If the volume ended above −10 dB, a large **"Lower to −30 dB"** button comes first, then the before/after diff |
 | **Louder after a PEQ preset change** | Loud. The preamp sets the overall level, and the filters then cut or boost single frequencies on top | Each preset carries its own preamp (from −1.1 to −6.7 dB in `presets/`). Going from E3 (−1.1 dB) to Sundara (−6.7 dB) and back raises the overall level 5.6 dB. "Flat" leaves the preamp alone, so frequencies the old preset cut get louder | The preview states a preamp rise and its size in dB. For Flat, it says the preamp stays where it is. When the current preamp is unknown, the preview says the level change is unknown. Whether a rise also needs the unlock is question 12 |
 | **Gain switched to high** | Louder by an amount **not measured** here | Toggling gain on a headphone output | **Not in r1.** Gain is a loudness control and needs the same treatment as volume. See question 8 |
@@ -104,7 +104,7 @@ doesn't count.
 | **Overwriting stored scenes** | Loses the C1/C2 presets on the device | Scene save | **Absent.** One line says why, so nobody goes looking for it |
 | **Acting on stale state** | Wrong decisions, and "+" from the wrong base | Changes from the front panel, remote or vendor app are invisible to the cache | Every value carries its **source and age**: "read from device 12 s ago" or "last written by toppingctl 2 h ago, may be stale". A value nobody has ever read shows **"Unknown"**, never 0 or blank |
 | **An unreachable host mistaken for a quiet one** | Confusion, and repeated retries | Network, host down | The room card says **"Unreachable"** with the host name and when it was last seen. Its values are greyed and labelled as last known. Its controls are disabled |
-| **Dry-run skipped** | A wrong frame sent | Habit | **Every write is a preview first**: the room, the change, the frames in hex (one tap away) and then **Send**. The only exceptions are the quieter-only actions in design rule 5. This is the dry-run built into the flow, so there's no flag to forget. (The prototype lists frames for volume and scenes. For presets it only counts them: 4 preamp frames, 110 band frames and a commit) |
+| **Dry-run skipped** | A wrong frame sent | Habit | **Every write is a preview first**: the room, the change, the frames in hex (one tap away) and then **Send**. The only exceptions are the quieter-only actions in design rule 5. This is the dry-run built into the flow, so there's no flag to forget. (Prototype r1 lists frames for volume and scenes. Prototype r2 lists frames for power, and for presets it only counts them: 4 preamp frames, 110 band frames and a commit). *Note (TOPPINGCTL-10): volume is the exception now. All volume changes send without a preview, debounced; see decision 13 in the [architecture plan](../plans/2026-10-26-web-ui-architecture-plan.md).* |
 
 ## Design rules that follow
 
@@ -115,12 +115,14 @@ doesn't count.
 3. Writes go **Preview → Send → feedback → Undo** where undo is possible. Volume and preset can
    be undone by writing the previous value. A scene recall can be undone only for the confirmed
    registers it changed (volume), so the diff says which fields can be restored.
+   *Note (TOPPINGCTL-10): for volume this no longer applies. Volume changes, undo included, send without a preview and are debounced; see decision 13 in the [architecture plan](../plans/2026-10-26-web-ui-architecture-plan.md).*
 4. A disabled control always says why, in one line, in plain words.
 5. **One exception to preview-first:** after a scene recall leaves a room above −10 dB,
    "Lower to −30 dB" sends at once. It can only make the room quieter, and a preview would only
    slow that down. An undo of a volume change that lands at or below −10 dB also sends at once.
    Undo never goes back up to a loud level in one tap: that has to be set again, with the
    unlock. An undo of a preset is previewed like any other change.
+   *Note (TOPPINGCTL-10): for volume, decision 13 replaces this rule. Volume undo is debounced like any other volume change, with no preview. An undo that raises a room above −10 dB needs the unlock. An undo that lowers it needs none. See the [architecture plan](../plans/2026-10-26-web-ui-architecture-plan.md).*
 6. Only absolute targets are sent.
    A typed level is read as **dB below 0**: "32" means −32.0 dB, with "−" shown before the
    field. An explicit minus is still accepted, and 0 stays 0 dB. Every level is at or below
@@ -153,8 +155,9 @@ reachability must be reported per host.
    - (c) Leave scene recall out of the web UI. It stays on the remote and the CLI.
 3. **How does unlocking above −10 dB work?**
    - (a) A checkbox in the room view that covers one change and re-locks after Send or Cancel.
-     *(the prototype's default. It could also expire after a timeout, which the prototype
-     doesn't do.)*
+     *(the prototype's default in r1. Prototype r2 adds a 60 s timeout.)* *Note (TOPPINGCTL-10, 2026-11-01): for volume, the answer is now "one gesture,
+     ≤ 60 s": the checkbox covers a burst of changes until the 60 s cap, Cancel, or leaving the room
+     (George, 2026-11-02: a pause after the volume settles doesn't relock it). See decision 13 in the [architecture plan](../plans/2026-10-26-web-ui-architecture-plan.md).*
    - (b) Type the target in dB to confirm, like typing a repo name to delete it.
    - (c) Not available in the web UI at all. Loud levels only via the CLI's `--force`.
 4. **How does the UI reach each room's DAC?**
@@ -196,6 +199,7 @@ reachability must be reported per host.
     - (b) Within the safe range (at or below −10 dB) and from a value read this session, send
       steps at once. Keep the preview for typed targets, presets, scenes and anything loud.
     - (c) Send *quieter* steps at once, and preview louder ones.
+    *Answered 2026-10-31 (TOPPINGCTL-10): none of these. All volume changes send without a preview, debounced. See decision 13 in the [architecture plan](../plans/2026-10-26-web-ui-architecture-plan.md).*
 12. **Should a preset that raises the preamp need the unlock?** Going from Sundara (−6.7 dB
     preamp) to E3 (−1.1 dB) raises the overall level by 5.6 dB.
     - (a) Warn in the preview, with the dB difference, but don't require the unlock. *(the

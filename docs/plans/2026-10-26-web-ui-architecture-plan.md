@@ -46,9 +46,52 @@ Quoted from the ticket:
 10. "Use: mostly in the room, on his phone, with volume the main task."
 11. "Volume steps: within the safe range (at or below −10 dB) and from a value read this
     session, +/− steps send at once; typed targets, presets, scenes and anything loud keep the
-    preview."
+    preview." *(Superseded for volume on 2026-10-31 by decision 13 below. Presets and scenes
+    keep the preview.)*
 12. "A preset that raises the preamp requires the unlock when volume plus the preamp rise would
     go above −10 dB."
+
+### From TOPPINGCTL-10 (George, 2026-10-31), changing decision 11 for volume
+
+George's original message, quoted from the ticket:
+
+> "I noticed in the toppingctl app that I need to "stage changes" before making them. While I think this is good for large changes (eg: adjusting more than 6dB) for single volume up/down clicks - that extra effort is annoying. Let's adjust the app to not ask for the confirmation step at all - we can debounce the changes in order to make them more efficient"
+
+Asked how far that goes, George chose an option. The scope below is the ticket's summary of that
+option, not George's own words:
+
+13. "all volume changes (+/− steps, slider, typed target) send without a preview, including large
+    jumps; the "Allow above −10 dB" unlock stays (decision 3). Presets and sleep/wake keep their
+    preview."
+
+This supersedes decision 11 for volume only. The ticket's debounce notes (300 ms of quiet, one
+write in flight per room, one queued target, a re-read before each write, "sending…" versus
+"set") are the orchestrator's design, not George's decisions.
+
+Interpretations taken with decision 13, to confirm or change:
+
+- **"Quieter" means quieter than the level the device last reported** (the read the agent takes
+  before the write). A target at or below that level is always allowed. A target above −10 dB
+  and not quieter than that level needs the unlock.
+- **One unlock lasts 60 s: "One gesture, ≤ 60 s"** (George, 2026-11-01; run to the cap,
+  George, 2026-11-02). The checkbox reads "Allow above −10 dB for 60 s" (George, 2026-11-03), with
+  the countdown in the note. The unlock runs until the 60 s cap, Cancel, leaving the room or signing
+  out, or unticking the box. Settling and pausing don't relock it: a drag that resumes within the cap is
+  allowed without ticking the box again. Leaving the room or signing out also cancels a queued
+  volume change that hasn't been sent, and says so if a write already in flight may still land.
+- **A queued target is dropped when the write in flight fails or is refused.** The UI shows the
+  device's read value and the error, not the dropped target.
+- **An undo that lowers the level needs no unlock, even if it lands above −10 dB.** This is an
+  interpretation, not George's decision. The existing rule stands: quieter is always allowed. An
+  undo that raises the level above −10 dB needs the unlock.
+- **Undo returns to the level read before the whole burst** of writes it reverses, not the level
+  before the last write. A burst can be several writes while one is queued behind another.
+- **Every volume write carries `expected_db`** (the compare-and-set from Q4). The old limit of one
+  `volumeStep` per step is gone, so a typed jump of any size is a single write.
+- **Presets, sleep and wake keep the existing preview bar**, unchanged.
+- **One checkbox, two objects.** A loud preset send uses the unlock and relocks the checkbox, but
+  only when no volume change is in flight or queued in any room, so a preset never ends an open
+  volume change.
 
 ### Answers to this plan's questions (George, 2026-10-26, ticket comment)
 
@@ -60,7 +103,8 @@ Quoted from the comment:
   responses), as proposed. No mTLS, no host firewall."
 - **Q4, +/− freshness:** "re-read the device in the same operation before every step, as
   proposed."
-- **Q5, unlock:** "60 s, covering one planned change, as proposed."
+- **Q5, unlock:** superseded for volume by "One gesture, ≤ 60 s" (George, 2026-11-01; see the
+  interpretation above). It replaces "60 s, covering one planned change, as proposed."
 - **Q7, preamp-rise base:** "the last-written value; unknown counts as loud; with no preamp,
   the largest band boost counts, as proposed."
 - **Q11, session length:** "30 days."
@@ -221,9 +265,11 @@ the agent reads a model only through a path that is established for that model:
 | **Read failed** | device opened but the model's read returned nothing | values "Unknown", with the agent's error in one line | disabled for anything that needs a fresh read |
 | **Asleep** | **(unknown)**. The spec doesn't say what GetSettings returns in standby. The capabilities doc notes writes to a sleeping unit were accepted silently | to be decided once measured (step 2) | decided in step 6 |
 
-Writes are **never queued**. A change sent while a room is unreachable fails at once with
+The **agent** never queues a write. A change sent while a room is unreachable fails at once with
 "office is unreachable. Nothing was sent." It isn't replayed when the host comes back, because a
-write replayed minutes later acts on a state nobody has looked at.
+write replayed minutes later acts on a state nobody has looked at. The **UI** holds at most one
+queued volume target per room while a write is in flight (decision 13). If that write fails or is
+refused, the queued target is dropped and the UI shows the device's read value.
 
 ## Where each part runs and how it's deployed
 
@@ -397,15 +443,15 @@ and mute was never driven. Both tables are code constants, not config.
 | **Only the DX5 II is confirmed; other models are read-only** | Capabilities come from `DEVICES[key]["status"]`. Anything not `"confirmed"` gets an empty write list. The agent has no `--unverified` and no config switch that grants it. A write to a D90 III returns `403 model_unverified` with the reason in plain words |
 | **Input, output and mute: read-only for now** (decision 1) | They are absent from the write list for **every** model, including the DX5 II, until a hardware-confirmation ticket marks each one confirmed in code |
 | **Scene recall: out of the web build for now** (Q15) | No `scene.recall` operation exists, and `71 11`/`71 12` aren't in `CONFIRMED_WRITES`. A later ticket confirms recall on the front panel, then adds the feature with decision 2's guard (the unlock, plus "Lower to −30 dB" after a loud result) |
-| **Volume above −10 dB needs an explicit force** | A plan whose result is above −10 dB is refused unless the Send request carries `allow_loud: true` for that plan. The agent checks **both** the requested level and the level after quantising to the device's step. `cmd_vol` today checks only the requested `db`, which is safe with Python's `round` but should be explicit |
-| **The unlock covers one change, re-locks after Send or Cancel, and times out after 60 s** (decision 3, Q5) | `allow_loud` lives on a single plan, not a session or a room. A plan is single-use and expires 60 s after it is created. Cancelling, expiring, sending, or a Send rejected with `409 changed` all discard it, and its unlock with it. The fast-step route refuses `allow_loud` outright |
+| **Volume above −10 dB needs an explicit force** | A plan whose result is above −10 dB is refused unless the Send request carries `allow_loud: true` for that plan. A volume write (no plan) above −10 dB is refused unless it is not louder than the fresh read, or carries a live `unlock_id` (decision 13). The agent checks **both** the requested level and the level after quantising to the device's step. `cmd_vol` today checks only the requested `db`, which is safe with Python's `round` but should be explicit |
+| **The unlock lasts 60 s: it ends at the cap, on Cancel, leaving the room or signing out** (decision 3, Q5, "One gesture, ≤ 60 s") | For a plan, `allow_loud` lives on that plan alone, not a session or a room. The plan is single-use and expires 60 s after it is created. Cancelling, expiring, sending, or a Send rejected with `409 changed` all discard it. For a volume write, the unlock is a separate object: `POST /v1/unlocks` returns an `unlock_id` that expires 60 s after it is created. A volume write with a live `unlock_id` is accepted above −10 dB and doesn't consume it, so a pause in a drag doesn't end the gesture. `DELETE /v1/unlocks/{id}` discards it, and so does a `409`. The UI keeps the checkbox on, and sends the `unlock_id` with each volume write, until the 60 s cap, Cancel, leaving the room or signing out, or unticking the box. Settling and pausing don't end it. On Cancel, leaving, or unticking, the UI calls DELETE and the checkbox relocks; leaving also cancels a queued volume change, and says so if a write in flight may still land. The agent checks the unlock when it runs each write, not when the UI queued it, so a write that is checked after the 60 s cap is refused |
 | **High gain is treated like the unlock** (decision 8) | A plan that switches gain on is "loud" and needs `allow_loud`. Switching it off needs only the normal preview |
 | **A preset that raises the preamp needs the unlock if volume + rise > −10 dB** (decision 12, Q7) | The agent computes `rise = new_preamp − last_written_preamp` and requires `allow_loud` if `volume + rise > −10`. If nothing was ever written, the rise is unknown and counts as loud. A preset that declares no preamp leaves `0x9c` alone (`cmd_apply`), so its largest positive band gain counts as the rise. The last-written value can be wrong if the vendor app changed the preamp since. The preview says the base is "last written by toppingctl" |
-| **"Lower to −30 dB" sends at once** (design rule 5) | `POST /v1/volume` with `quieter_only: true` is accepted without a plan **only if** a read taken just before, in the same operation, shows the current level is louder than the target, and the target is at or below −10 dB. In step 4 the UI offers it whenever a read shows the room above −10 dB, for example after the knob was turned up. In step 6 it also appears after a loud wake (Q13) |
-| **Undo of a volume change sends at once if it lands at or below −10 dB; it never goes back up to a loud level in one tap** (design rule 5) | Each result carries an `undo` token naming the previous level and the level just set. `POST /v1/volume {undo}` is accepted without a plan only if the target is ≤ −10 dB and a fresh read still shows the level that change set. Otherwise the undo becomes a normal previewed plan. An undo back above −10 dB is refused on this route. Preset and gain undo are always previewed |
-| **+/− steps send at once in the safe range, from a value read this session** (decision 11, Q4) | `POST /v1/volume {target_db, expected_db}` without a plan reads the device **in the same operation, just before writing**, and sends only if: (a) target ≤ −10 dB, before and after quantising; (b) the target is one `volumeStep` from `expected_db`, compared in raw device units, not float dB; (c) `expected_db` equals that fresh read. Anything else gets `409` with the fresh state, and the UI falls back to the preview. The fresh read is what stops a "+" from a stale −30 dB jumping 30 dB after the knob went to −60 elsewhere. The step's response reports the level as "sent", and the next step's read confirms it |
-| **Dry-run first** | (1) Every non-exempt write is two-phase. `POST /v1/plans` builds the frames and returns them, as `--dry-run` does, and only `POST /v1/plans/{id}/send` sends. Unlike today's CLI dry-run, which assumes 0.5 dB per step (`cmd_vol`), a plan reads `volumeStep` from the device, so the frames shown are the frames sent. (2) A new agent ships with `mode: dry-run`, where **every** sending route, including Send and all of `POST /v1/volume` (step, `quieter_only`, `undo`), returns the frames and sends nothing. A test covers each route. George switches the office host to `live` after watching one dry-run plan on the front panel (step 4) |
-| **Only absolute targets** (task analysis) | The API has no relative volume. `target_db` is always absolute, so a retried request gives the same result |
+| **"Lower to −30 dB" sends at once** (design rule 5) | An ordinary volume write. It needs no unlock, because the agent reads the device in the same operation and finds the level louder than the target. In step 4 the UI offers it whenever a read shows the room above −10 dB, for example after the knob was turned up. In step 6 it also appears after a loud wake (Q13) |
+| **Undo of a volume change is a volume write** (design rule 5, decision 13) | Each result carries an `undo` token naming the previous level and the level just set. Undo is `POST /v1/volume` to the level read before the burst of writes it reverses (the UI keeps that level, since a burst can be several writes), with `expected_db` set to the level the burst set, debounced in the UI like any other change. An undo that raises the level above −10 dB needs a live `unlock_id` and is refused without one. An undo that lowers the level needs none, even if it lands above −10 dB. Preset and gain undo are always previewed |
+| **Volume writes send without a preview, debounced** (decision 13, superseding decision 11 for volume) | `POST /v1/volume {target_db, expected_db, unlock_id?}`, with no plan. The agent reads the device **in the same operation, just before writing**, and sends only if: (a) `expected_db` equals that fresh read, compared in raw device units, not float dB; otherwise it returns `409` with the fresh state, and the UI shows "Changed elsewhere"; (b) the −10 dB rule passes, checked before and after quantising. Above −10 dB, the target must not be louder than the fresh read, or carry a live `unlock_id`. A jump of any size is allowed; there is no one-`volumeStep` limit. The response reports the level from the read-back. The UI keeps one write in flight per room, and the latest target typed during a write waits behind it. The UI debounces input by 300 ms of quiet, so a burst of taps sends one write. A target typed during a write goes as soon as that write settles, with no further quiet time, since the write's own time spaces the writes. The fresh read stops a "+" from a stale −30 dB jumping 30 dB after the knob went to −60 elsewhere |
+| **Dry-run first** | (1) Every write except volume is two-phase. `POST /v1/plans` builds the frames and returns them, as `--dry-run` does, and only `POST /v1/plans/{id}/send` sends. Unlike today's CLI dry-run, which assumes 0.5 dB per step (`cmd_vol`), a plan reads `volumeStep` from the device, so the frames shown are the frames sent. Volume writes have no plan, so in `mode: dry-run` `POST /v1/volume` returns the frames it would send and sends nothing. (2) A new agent ships with `mode: dry-run`, where **every** sending route, including Send, `POST /v1/volume` and undo, returns the frames and sends nothing. A test covers each route. George switches the office host to `live` after watching one dry-run plan and one dry-run volume write on the front panel (step 4) |
+| **Only absolute targets** (task analysis) | The API has no relative volume. `target_db` is always absolute, so a retry with the same target is safe. For a volume write, `expected_db` makes a retry after a write that already landed return `409` with the fresh state, not a second write |
 
 Two things the agent **can't** enforce, stated so the UI doesn't imply it does:
 
@@ -431,14 +477,17 @@ from.
 | `POST /v1/plans` | `{op, args, expected}`. The agent reads the device, applies the rules and builds the frames, then returns `{plan_id, summary, before, after_predicted, frames[], needs_unlock, expires_at}`. Nothing is sent |
 | `POST /v1/plans/{id}/send` | `{allow_loud?}`. The agent re-reads. If any field **the operation depends on** differs from the plan's `before`, it returns `409 changed`, sends nothing, and discards the plan. By default that means volume, `volumeStep`, gain, output and power, for every operation. Volume is in the set for presets too, because of the preamp-rise rule. Fields such as `sampleRate` change with playback and are ignored. Otherwise it sends exactly the planned frames, reads again, and returns `{before, after, loud_result, undo}`, all under one device open and one lock |
 | `POST /v1/plans/{id}/cancel` | Discards the plan, and its unlock with it |
-| `POST /v1/volume` | Fast path only: a safe step, `quieter_only`, or a safe `undo`. Everything else is refused with a pointer to `/v1/plans` |
+| `POST /v1/volume` | Every volume change, with no plan: `{target_db, expected_db, unlock_id?}`. Reads, checks and writes in one operation (decision 13). Returns `{before, after, loud_result, undo}`. Anything that isn't volume is refused with a pointer to `/v1/plans` |
+| `POST /v1/unlocks` | `{}` returns `{unlock_id, expires_at}`, 60 s after it is created. Volume writes don't consume it. Nothing is sent |
+| `DELETE /v1/unlocks/{id}` | Discards an unlock. The UI calls it on Cancel, on leaving the room, or when the box is unticked; the agent discards it on a `409` |
 
-The operations are `volume.set`, `gain.set`, `preset.apply` and `preset.flat`, then
-`power.set` (step 6). That is the whole write surface. `scene.recall` waits for its own ticket
-(Q15).
+The plan operations are `gain.set`, `preset.apply` and `preset.flat`, then `power.set` (step 6).
+Volume is not a plan operation: it goes through `POST /v1/volume` (decision 13). That is the whole
+write surface. `scene.recall` waits for its own ticket (Q15).
 
 **Latency (estimate, unmeasured):** with today's fixed 2 s read, a previewed change costs about
-2 s for the plan, then about 4 s for Send (re-read, write, read-back), and a fast step about 2 s.
+2 s for the plan, then about 4 s for Send (re-read, write, read-back). A volume write has no plan,
+so it costs one re-read, one write and one read-back, about 4 s, after the UI's 300 ms of quiet.
 The early-stopping read (step 2b) is what makes the phone usable, once step 2 has measured
 what it can stop on.
 
@@ -451,9 +500,9 @@ George is the only user (decision 6), but there are still several writers.
 
 | Writer | What the plan does |
 | --- | --- |
-| George on two devices (phone and laptop tabs) | Compare-and-set. Every write carries `expected`, and the agent checks it against a fresh read. A mismatch returns `409` with the new state, and the UI says "Changed elsewhere: now −24.0 dB (read 0 s ago)". It doesn't resend |
+| George on two devices (phone and laptop tabs) | Compare-and-set. Every write carries `expected`, and the agent checks it against a fresh read. A mismatch returns `409` with the new state, and the UI says "Changed elsewhere: Office reads −24.0 dB, not the −32.0 dB this change started from. Read Office again, then set the level again." It doesn't resend |
 | The CLI on the same host | An advisory `flock` on a fixed `device.lock`, taken **once per command or agent operation**, at the top. See "The device lock" below |
-| Front panel, IR remote, Home Assistant's IR blaster | Invisible until the next read. The agent reads before every plan, every Send and every fast step. While a UI is open on a room, `toppingweb` polls `state?fresh=1` (proposal: every 10 s, one poller per room however many tabs are open). With no viewer, it doesn't poll. At 2 s per read, that polling holds the DAC about 20 % of the time, which is another reason for the early-stopping read |
+| Front panel, IR remote, Home Assistant's IR blaster | Invisible until the next read. The agent reads before every plan, every Send and every volume write. While a UI is open on a room, `toppingweb` polls `state?fresh=1` (proposal: every 10 s, one poller per room however many tabs are open). With no viewer, it doesn't poll. At 2 s per read, that polling holds the DAC about 20 % of the time, which is another reason for the early-stopping read |
 | Vendor web app | The code already records that the vendor app takes the device and "only one client gets it" (`devstate.py:128–130`). The agent retries an open a few times, as `read_settings` does, then reports "In use by another app" and disables writes. The flock can't cover the vendor app, so between two of the agent's operations it can take the device. That is why every operation re-reads. If the DAC is plugged into another computer, the agent reports "No DAC found" |
 | PEQ writes in progress | A preset is 110 band frames, 4 preamp frames and a commit. Under the per-device lock, nothing else interleaves. If the HID write fails partway, the result says "Preset partly written. Re-apply or apply Flat" and the preset record is set to `unknown`, not to the new name |
 
@@ -579,7 +628,7 @@ Each step ends in something George can check. Stopping after step 3 is a real op
    (decision 1). Merge PR #25 before ticket 1a starts.
 1. **Step 1 is four tickets.** Each is safe to merge on its own, and in this order:
    - **1a. `plan_*` / `Refused` refactor, `CONFIRMED_WRITES` and `CONFIRMED_READS`.** Pure functions such as
-     `plan_volume(spec, db, step_db, allow_loud) -> list[Frame]` raise `Refused(reason)`
+     one `plan_*` builder each for `gain.set`, `preset.apply`, `preset.flat` and `power.set` raises `Refused(reason)` (volume has no plan; see "Volume writes send without a preview")
      instead of calling `sys.exit`. The `cmd_*` functions become thin wrappers that print and
      exit as they do now, so there is **one** −10 dB check, **one** unverified check and
      **one** frame builder for the CLI and the agent. `CONFIRMED_WRITES` comes from the spec's
@@ -628,9 +677,9 @@ Each step ends in something George can check. Stopping after step 3 is a real op
      returns as soon as the full set has arrived, and keeps the 2 s window as a ceiling.
      - Tests: a fake device that sends the full set returns early.
      - One that sends a short set still waits out the ceiling and reports the gap.
-3. **`toppingweb`, read-only**, preceded by **prototype r2** (UI.md: the prototype comes before
+3. **`toppingweb`, read-only**, preceded by **prototype r2** (`UI.md` in gjcourt/agents: the prototype comes before
    production UI). r2 adds:
-   - fast +/− steps,
+   - volume changes with no preview: +/− steps, the slider and a typed target, debounced (decision 13),
    - the 60 s unlock,
    - gain,
    - sleep and wake with preview and undo (decision 7: "in r2"),
@@ -640,10 +689,10 @@ Each step ends in something George can check. Stopping after step 3 is a real op
 
    r2 drops scene recall (Q15). George evaluates it. Then build sign-in, the room list and live
    state behind Authelia, and deploy via a homelab PR.
-4. **Volume writes on the DX5 II in the office** (Q1): the fast path, plans, the unlock,
+4. **Volume writes on the DX5 II in the office** (Q1): `POST /v1/volume`, the unlock,
    "Lower to −30 dB" and undo. Switch the office host to `mode: live` only after watching a
-   dry-run plan, then one live −1 dB step on the front panel, then `smoke.py` (the AGENTS.md
-   sequence).
+   dry-run plan and a dry-run volume write, then one live −1 dB step on the front panel, then
+   `smoke.py` (the AGENTS.md sequence).
 5. **Presets and gain**, each with its own front-panel check.
 6. **Sleep and wake**, built from prototype r2, with preview and undo. It is blocked on the
    asleep-state measurement from step 2. Waking resumes the stored volume, so the agent reads
@@ -669,18 +718,27 @@ All of these run offline in CI and call the agent API, not the UI:
   - input (`71 04`) and output (`71 05`).
 - The DX1 II reader never sends `11 06`, and never sends a readNack outside the vendor's
   read-safe list. The D90 III gets no frames at all.
-- A volume above −10 dB is refused without `allow_loud`. It is also refused with `allow_loud`
-  on the fast path, and with `allow_loud` on an expired (60 s), cancelled, already-sent or
-  409-rejected plan.
+- A volume above −10 dB that is louder than the fresh read is refused without a live
+  `unlock_id`. A volume write with an expired (60 s), cancelled or 409-discarded unlock is
+  refused. The same holds for `allow_loud` on an expired (60 s), cancelled,
+  already-sent or 409-rejected plan.
+- A paused drag: volume writes above −10 dB under one unlock, one after a pause and one queued
+  during another write, are both accepted while the unlock lives. The first write after the
+  unlock expires at 60 s is refused. A pause after the volume settles doesn't relock the unlock:
+  a drag that resumes within the cap is accepted.
+- Leaving the room or signing out ends the unlock, cancels a queued volume change that hasn't been
+  sent, and says so when a write in flight may still land.
 - Rounding to the device step can't take a level that was accepted as "≤ −10 dB" above it,
   under either `volumeStep`.
 - Gain on, and a preset whose rise crosses −10 dB, each need the unlock. That covers an unknown
   last-written preamp, and a preset with no preamp but positive band gain.
-- A fast step is refused when `expected_db` doesn't match the read taken in the same operation,
-  or when the step is bigger than one `volumeStep`. A fake device that "moves the knob" between
-  two steps proves it.
-- `quieter_only` is refused when the target isn't quieter than a fresh read. A fast `undo` is
-  refused above −10 dB, or when the level has changed since the change it undoes.
+- A volume write is refused with `409` when `expected_db` doesn't match the read taken in the same
+  operation, and sends a jump of any size when it does. A fake device that "moves the knob"
+  between two writes proves the 409.
+- A volume write above −10 dB that is louder than the fresh read is refused without a live
+  `unlock_id`. An `undo` that raises the level above −10 dB is refused without one, and any `undo`
+  is refused when the level has changed since the change it undoes. A quieter `undo` above −10 dB
+  is accepted without an unlock.
 - Send ignores changes to fields the operation doesn't depend on, such as `sampleRate`.
 - When the CLI holds the lock, the agent answers `423 busy` within its 2 s wait, naming the
   holder.
