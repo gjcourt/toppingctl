@@ -199,7 +199,9 @@ DEVICES = {
         #
         # ⚠️ READS ARE WRITE-ONLY-ADJACENT HERE. A readNack is only a read for
         # the registers the vendor's own query builder allows:
-        # DX1_VENDOR_READ_SAFE. 0x1106, the 3-slot PEQ dump, is also queried
+        # DX1_VENDOR_READ_SAFE -- and not even for all of those: 0x7900 and
+        # 0x7d00 write on hardware too (DX1_READ_WRITES, #32), so they are
+        # never read. 0x1106, the 3-slot PEQ dump, is also queried
         # (DX1_REG_PEQ_DUMP, see devstate.dx1_query) but is NOT on that vendor
         # list -- it rests on one contributor's unmeasured claim, not a
         # recorded hardware test. See devstate.dx1_query's docstring before
@@ -368,7 +370,8 @@ DX1_REG_SCENE = (0x78, 0x00)
 # vendor bundle's requestGroup builder allows exactly these; for any other
 # register the device treats the readNack as a WRITE of its data field (see
 # devstate.dx1_query). devstate reads 0x810a as a block (dx1_read_block) and
-# the rest one at a time. 0x810d is allowed but nothing here reads it.
+# the rest one at a time. 0x810d is allowed but nothing here reads it. Two of
+# these write anyway on hardware and are never read: DX1_READ_WRITES.
 DX1_VENDOR_READ_SAFE = (
     (0x71, 0x00),
     (0x79, 0x00),
@@ -389,8 +392,19 @@ DX1_VENDOR_READ_SAFE = (
 # vendor list: it rests on one contributor's unmeasured claim (PR #25), so it
 # is left out of CONFIRMED_READS until a recorded hardware read backs it.
 DX1_REG_PEQ_DUMP = (0x11, 0x06)
+# On the vendor list, but a readNack WRITES its data field anyway (#32):
+# readNack 0x7d00 (data 0) set autoScreenOff from 4 ("Never") to 0 (5 s), and
+# 0x7900 set autoStandby from 4 to 0 (5 min) even though it sent no answer.
+# Measured from the device's own state push, twice, on a DX1 II, 2026-10-31
+# (V16.13.23.13 in TOPPING Home, 0x0307). Never read them with a readNack.
+DX1_READ_WRITES = (
+    (0x79, 0x00),
+    (0x7D, 0x00),
+)
 # Every register devstate sends a readNack to on the DX1 II.
-DX1_READ_REGS = DX1_VENDOR_READ_SAFE + (DX1_REG_PEQ_DUMP,)
+DX1_READ_REGS = tuple(r for r in DX1_VENDOR_READ_SAFE if r not in DX1_READ_WRITES) + (
+    DX1_REG_PEQ_DUMP,
+)
 
 # Volume raw is (dB + 99) * 10, 0..990. Below -10 dB the scale is 1 dB/step
 # (multiples of 10); above -10 it is 0.5 dB (multiples of 5). Decoded from the
