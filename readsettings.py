@@ -87,6 +87,9 @@ def dx1_show(st):
         print(f"  {label:<18} {v:<6}{extra}")
 
     print("\nPEQ configs (slot order)")
+    if st["configs"] is None:
+        print("  not read (0x1106 dump skipped)")
+        return
     for i, words in enumerate(st["configs"], 1):
         nb = []
         for w in words[0:4]:
