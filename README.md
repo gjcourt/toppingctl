@@ -58,6 +58,20 @@ D90 III's UAC2-only volume) and the device-verification workflow are in
 | `--unverified` | off | Allow writes to a device whose register map isn't confirmed. |
 | `--force` | off | `vol` option: allow levels above −10 dB. |
 | `--vol-step` | read from device | Override the dB-per-step, for models that don't support a settings read. |
+| `TOPPINGCTL_STATE_DIR` | `~/.toppingctl` | Environment variable: where the last-written cache (`state.json`) lives. |
+
+Every command that opens the device first takes an advisory lock,
+`/var/lib/toppingctl/device.lock` if that directory exists, else
+`~/.toppingctl/device.lock`. The lock path ignores `TOPPINGCTL_STATE_DIR`, so a
+run under `sudo` contends for the same lock. If another process holds it, the
+command waits up to 15 s, then exits naming the holder. The lock is refused (a
+write exits, a read warns) if it is a symlink, a hard link, not a regular file, or
+owned by anyone other than you or root. It is also refused if its directory is a
+symlink or is writable by group or others. The exceptions are a root-owned sticky
+directory and the agent's `root:toppingd` directory (not other-writable). If an
+older version left `~/.toppingctl` group-writable, run `chmod go-w ~/.toppingctl`.
+`state.json` is written under the same directory rule, as a temp file renamed into
+place, so a symlink planted at that path is replaced rather than written through.
 
 ## How it works
 
@@ -69,7 +83,7 @@ linked from [AGENTS.md](AGENTS.md) for the full register map. A handful of
 standalone scripts cover the rest of the protocol: `readsettings.py` queries live
 device state instead of the tool's local write cache, `listen.py` sends a raw read
 for any register, `meters.py` prints the unsolicited VU/FFT pushes, `scenes.py`
-recalls a stored C1/C2 scene, `setctl.py` sets one named field with a read-verify
+recalls a stored C1/C2 scene (C1–C3 on the DX1 II), `setctl.py` sets one named field with a read-verify
 round trip, and `probe.py` sends one raw register write for mapping an unknown
 enum. Each takes `--help`.
 

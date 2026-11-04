@@ -18,7 +18,7 @@ import argparse
 import sys
 
 from listen import NEVER
-from toppingctl import REG_CTRL, Device, frame
+from toppingctl import REG_CTRL, Device, cli_device_lock, frame
 from vendor_commands import COMMANDS
 
 # Derived from listen.py's list rather than restated, so the read-only tool and
@@ -47,6 +47,14 @@ def main():
     if not a.dry_run:
         if input(f"  write {name} = {a.value}? [y/N] ").strip().lower() != "y":
             sys.exit("  aborted")
+    if a.dry_run:
+        return send(a, sub, name)
+    # Taken after the prompt, so a slow answer doesn't hold the DAC.
+    with cli_device_lock(write=True):
+        send(a, sub, name)
+
+
+def send(a, sub, name):
     dev = Device(a.dry_run, a.device)
     dev.send(frame(REG_CTRL, sub, a.value), f"probe 71 {sub:02x} = {a.value}")
     dev.commit()

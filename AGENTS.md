@@ -15,13 +15,18 @@ If the two disagree, the spec was tested against hardware and this was not.
 - **`--dry-run` first, always.** It prints frames without sending them. Every
   command supports it.
 - **The device can be read.** `readsettings.py` queries live state. (This line used to say the opposite; that predated the read work.) `show` reports
-  what *this tool last wrote*, cached in `~/.toppingctl/state.json`. Anything
+  what *this tool last wrote*, cached in `~/.toppingctl/state.json` (or `$TOPPINGCTL_STATE_DIR`). Anything
   changed from the front panel, remote, or vendor app is invisible and makes the
   cache stale.
 - **Never implement scene save (`71 35`).** It would overwrite the C1/C2 presets
   stored on the device. Deliberately absent.
 - **Volume above −10 dB requires `--force`.** A wrong level into headphones is
   the one irreversible mistake available here.
+- **Every entry point that opens the device takes the device lock** in its
+  `main()`, once per command: `with cli_device_lock(write=...)` from
+  `toppingctl.py`. The device grants one handle; the lock keeps the CLI scripts
+  and the planned agent from interleaving. `--dry-run` paths that open nothing
+  skip it. Library code (`devstate`, `Device`) never takes it.
 - **Only write registers confirmed in the spec.** Factory Reset lives in the same
   register space; blind sweeps are not safe. Read-only probing is.
 

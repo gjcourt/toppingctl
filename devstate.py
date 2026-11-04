@@ -4,8 +4,11 @@
 import time
 
 from toppingctl import (
+    CONFIRMED_READS,
+    DX1_BLOCK_LEN,
     DX1_OUT_STATE,
     DX1_READ_REGS,
+    DX1_READ_WRITES,
     DX1_REG_PEQ_DUMP,
     GET_SETTINGS,
     Refused,
@@ -54,6 +57,23 @@ def dx1_read_block(h, secs=1.5):
     return {b[2]: b[3] for b in _frames(h, secs) if b[0] == 0x810A}
 
 
+def dx1_pushed(h, secs):
+    """What the DX1 II pushes on its own within secs, sending nothing.
+
+    Returns (singles, block): {register: value} for single-frame settings, as
+    0x7800-style 16-bit numbers, and {frame_index: value} for the 0x810a
+    block. A later frame for the same register replaces an earlier one. Used
+    after a scene recall (the settings it set), so the state is read without
+    a readNack."""
+    singles, block = {}, {}
+    for cmd, total, cur, val in _frames(h, secs):
+        if cmd == DX1_OUT_STATE and total == DX1_BLOCK_LEN:
+            block[cur] = val
+        elif total == 1:
+            singles[cmd] = val
+    return singles, block
+
+
 def dx1_query(h, reg, sub, secs=0.7):
     """One dx1 register readNack. Returns the device's current value or None.
 
@@ -64,7 +84,10 @@ def dx1_query(h, reg, sub, secs=0.7):
     plausible while they silently reset the user's gain/filter/input to
     defaults, and the zero that came back was the echo of our own
     clobbering. The safe set is what the vendor bundle's
-    requestGroup builder allows: toppingctl.DX1_VENDOR_READ_SAFE.
+    requestGroup builder allows: toppingctl.DX1_VENDOR_READ_SAFE -- minus
+    0x7900 (autoStandby) and 0x7d00 (autoScreenOff), which are on that list
+    but were measured writing anyway: a readNack with data 0 set both from
+    "Never" to their shortest timeout (toppingctl.DX1_READ_WRITES, #32).
     0x1106, the 3-slot PEQ dump (dx1_read_configs, DX1_REG_PEQ_DUMP), is
     queried too, but it is NOT on the vendor's requestGroup list -- it is
     read on the strength of one contributor's unmeasured claim ("already
@@ -76,8 +99,13 @@ def dx1_query(h, reg, sub, secs=0.7):
     state arrives as an unsolicited push after it changes.
 
     So this refuses, before writing anything, any register outside
-    toppingctl.DX1_READ_REGS (that list plus 0x1106).
+    toppingctl.DX1_READ_REGS (that list, minus those two, plus 0x1106).
     """
+    if (reg, sub) in DX1_READ_WRITES:
+        raise Refused(
+            f"refusing a dx1 readNack to {reg:02x} {sub:02x}: on the vendor's "
+            "read-safe list, but measured writing its data field on hardware (#32)."
+        )
     if (reg, sub) not in DX1_READ_REGS:
         raise Refused(
             f"refusing a dx1 readNack to {reg:02x} {sub:02x}: not on the vendor's "
@@ -110,13 +138,12 @@ def dx1_read_configs(h, secs=4.5):
 
 
 # The registers dx1_state queries one at a time, by the names readsettings
-# decodes. Every key is on toppingctl.DX1_VENDOR_READ_SAFE (a test holds
-# that); 0x810a comes from dx1_read_block instead, and 0x810d is allowed but
-# not read.
+# decodes. Every key is on toppingctl.DX1_READ_REGS (a test holds that);
+# 0x810a comes from dx1_read_block instead, and 0x810d is allowed but not
+# read. autoStandby (0x7900) and autoScreenOff (0x7d00) are on the vendor list
+# but absent here: a readNack to either reset it on hardware (#32).
 DX1_STATE_QUERIES = {
     (0x71, 0x00): "state",
-    (0x79, 0x00): "autoStandby",
-    (0x7D, 0x00): "autoScreenOff",
     (0x81, 0x0B): "analogBalance",
     (0x81, 0x0C): "optBalance",
     (0x81, 0x0E): "remoteArrow",
@@ -129,28 +156,50 @@ DX1_STATE_QUERIES = {
 }
 
 
-def dx1_state(dev_key="dx1ii"):
+def dx1_state(dev_key="dx1ii", *, skip_peq_dump=False):
     """Everything the DX1 II will safely say about itself, decoded by
     readsettings. Queries are restricted to the vendor's read-safe register
     list (DX1_VENDOR_READ_SAFE; see dx1_query -- anything else turns the
     readNack into a write of the data field and clobbers the user's
-    settings), plus the unverified 0x1106 dump. The write-only registers
+    settings), minus the two on it that write anyway (DX1_READ_WRITES),
+    plus the unverified 0x1106 dump. The write-only registers
     (gain, filter, brightness, input, display mode, ...) are deliberately
-    absent: their state only arrives as an unsolicited push."""
+    absent: their state only arrives as an unsolicited push.
+
+    skip_peq_dump=True leaves out the 0x1106 dump, so every frame sent is in
+    CONFIRMED_READS. "configs" is then None -- not read,
+    as opposed to [] for a dump that returned nothing. The agent always
+    skips it: 0x1106's read-safety is one contributor's unmeasured claim."""
     h = open_checked(dev_key)
     try:
         blk = dx1_read_block(h)
         regs = {}
         for (reg, sub), name in DX1_STATE_QUERIES.items():
             regs[name] = dx1_query(h, reg, sub)
-        configs = dx1_read_configs(h)
+        configs = None if skip_peq_dump else dx1_read_configs(h)
         return {"block": blk, "regs": regs, "configs": configs}
     finally:
         h.close()
 
 
-def read_settings(dev_key="dx5ii", secs=2.0):
-    """Query the device and return {index: raw_value}."""
+def read_settings(dev_key="dx5ii", secs=2.0, *, h=None):
+    """Query the device and return {index: raw_value}.
+
+    With h, read through that already-open handle and leave it open, so one
+    operation (read, write, read-back) is one open of a device that grants
+    only one handle. Pass the model's real dev_key with it: that is what the
+    guard below checks. Without h, open one and close it.
+
+    Refuses, before sending anything, a model whose CONFIRMED_READS lacks
+    GetSettings. On the DX1 II a readNack to an unlisted register is a
+    WRITE of its data field (see dx1_query), and 0x710c is not listed."""
+    if GET_SETTINGS not in CONFIRMED_READS.get(dev_key, ()):
+        raise Refused(
+            f"refusing GetSettings ({GET_SETTINGS[0]:02x} {GET_SETTINGS[1]:02x}) on "
+            f"{dev_key}: not in CONFIRMED_READS for that model."
+        )
+    if h is not None:
+        return _read_settings(h, secs)
     # Opening can fail transiently when something else holds the device -- the
     # vendor web app claims it over WebHID, and only one client gets it. The
     # device is still enumerated, so this is contention, not absence.
@@ -163,33 +212,38 @@ def read_settings(dev_key="dx5ii", secs=2.0):
                 raise
             time.sleep(0.4)
     try:
-        h.write(frame(*GET_SETTINGS, 0, opcode=0x10))
-        rec, t0 = {}, time.time()
-        while time.time() - t0 < secs:
-            try:
-                b = h.read(64, timeout=200)
-            except Exception:
-                # The hid wrapper raises HIDException("Success") on a benign
-                # zero-length read. It is noise, not a failure -- the device
-                # streams empty reports when it has nothing to say.
-                continue
-            if (
-                b
-                and len(b) >= 15
-                and b[0] == 0x22
-                and b[1] == 0x33
-                and b[5] == GET_SETTINGS[0]
-                and b[6] == GET_SETTINGS[1]
-            ):
-                rec[b[4]] = int.from_bytes(bytes(b[7:11]), "big")
-        if not rec:
-            raise RuntimeError(
-                "device returned no settings records -- a timeout or a lost "
-                "handle, not a missing field. Retry."
-            )
-        return rec
+        return _read_settings(h, secs)
     finally:
         h.close()
+
+
+def _read_settings(h, secs):
+    """GetSettings over an open handle -> {index: raw_value}."""
+    h.write(frame(*GET_SETTINGS, 0, opcode=0x10))
+    rec, t0 = {}, time.time()
+    while time.time() - t0 < secs:
+        try:
+            b = h.read(64, timeout=200)
+        except Exception:
+            # The hid wrapper raises HIDException("Success") on a benign
+            # zero-length read. It is noise, not a failure -- the device
+            # streams empty reports when it has nothing to say.
+            continue
+        if (
+            b
+            and len(b) >= 15
+            and b[0] == 0x22
+            and b[1] == 0x33
+            and b[5] == GET_SETTINGS[0]
+            and b[6] == GET_SETTINGS[1]
+        ):
+            rec[b[4]] = int.from_bytes(bytes(b[7:11]), "big")
+    if not rec:
+        raise RuntimeError(
+            "device returned no settings records -- a timeout or a lost "
+            "handle, not a missing field. Retry."
+        )
+    return rec
 
 
 def by_name(dev_key="dx5ii", secs=2.0):
