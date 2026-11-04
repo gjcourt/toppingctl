@@ -462,7 +462,8 @@ George is the only user (decision 6), but there are still several writers.
 - **Who takes it.** A lock helper in `toppingctl.py` is taken in the `main()` of **every entry
   point that opens the device**, because the device grants one handle. That means:
   - `toppingctl.py`, `scenes.py`, `setctl.py`, `probe.py` and `smoke.py`;
-  - `meters.py`, `listen.py` and `readsettings.py`;
+  - `meters.py`, `listen.py` and `readsettings.py`. Of these, `meters.py` counts as a write:
+    its 71 34 heartbeat goes to the commit register, so it refuses when the lock is unusable;
   - the agent, around each operation.
 
   Library code such as `devstate.py` and `Device` never takes it. The helper is also reentrant
@@ -481,8 +482,11 @@ George is the only user (decision 6), but there are still several writers.
   contends for the same lock. The installer pre-creates the file as `root:toppingd` mode `0644`,
   and the helper opens it **read-only** for `flock` (which Linux allows), so a root run under
   umask 022 can't leave a lock file the agent is unable to use. On the `~/.toppingctl` fallback
-  the helper creates the file if it is missing. If the lock file can't be opened (for example,
-  `/var/lib/toppingctl` exists but the file was deleted and the caller can't recreate it), the
+  the helper creates the file if it is missing, mode `0600` (and the directory, if missing, `0700`).
+  The helper never follows a symlink at the lock path, and refuses an unsafe lock directory or
+  file (see "Where 'last written' lives" below). Only the installer creates the system lock
+  file: one the agent recreated would be owned by `toppingd`, which a root CLI run refuses. If
+  the lock file can't be opened (for example, `/var/lib/toppingctl` exists but the file was deleted and the caller can't recreate it), the
   CLI refuses to write and says why. Reads warn and continue.
 - **How long each side waits** **(proposal)**. The longest normal holders are:
   - `listen.py`, whose `--secs` defaults to 10 s and which holds the device for that long;
@@ -516,7 +520,21 @@ whoever ran it. That is root on the nodes, so the agent can't see it. Ticket 1b 
 the agent point it at `/var/lib/toppingctl`. A preset written from the CLI then shows in the UI
 as "last written by toppingctl". `save_state` writes with the default umask, so a root CLI run
 would leave a file the `toppingd` user can't rewrite. To prevent that, the directory is
-`root:toppingd`, mode `2775`, and the CLI wrapper sets `umask 002`.
+`root:toppingd`, mode `2775`, and the CLI wrapper sets `umask 002`. The device lock lives in the
+same directory and refuses a lock directory that is group- or other-writable, with two
+exceptions: a root-owned directory with the sticky bit, and this one. A group-writable lock
+directory is accepted only when it is owned by root **and its group is `toppingd`** (and it is
+not other-writable). A `toppingd` member can create files there, such as a symlink
+`state.json -> /etc/whatever` or a planted `device.lock`. So the checks on the opened files are
+what stop the directory being turned against a root run. Both files go through one fd on the
+checked directory, so it can't be swapped mid-way.
+
+- **`device.lock`:** opened with `O_NOFOLLOW` and `O_NONBLOCK`. It must be a regular file owned
+  by the caller or root, with exactly one link.
+- **`state.json`:** `save_state` never opens the existing file. It writes a fresh temp file
+  (`O_EXCL | O_NOFOLLOW`, with the same owner and single-link checks) and renames it over
+  `state.json`. A planted symlink or hard link is replaced, and its target is never written.
+  Because it is a rename, either side can replace a `state.json` the other wrote.
 
 ## Repo layout and language
 

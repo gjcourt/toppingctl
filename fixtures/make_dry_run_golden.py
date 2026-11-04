@@ -51,6 +51,7 @@ CI = [
     "toppingctl.py --device dx1ii --dry-run preamp -6",
     "toppingctl.py --device dx1ii --dry-run flat",
     "toppingctl.py --device dx1ii --dry-run apply presets/bass1.json",
+    "scenes.py --device dx1ii recall c3 --dry-run",
     "toppingctl.py --device dx5ii --dry-run vol -30",
     "toppingctl.py --device dx5ii --dry-run vol -30 --target hp",
     "toppingctl.py --device dx5ii --dry-run gain on",
@@ -90,6 +91,9 @@ EXTRA = [
     "toppingctl.py --device d90iii --dry-run vol -30",
     "toppingctl.py --device d90iii --dry-run flat",
     "toppingctl.py --device d90iii --dry-run apply presets/bass1.json",
+    "scenes.py recall c1 --dry-run",
+    "scenes.py recall c3 --dry-run",
+    "scenes.py --device d90iii recall c1 --dry-run",
 ]
 
 
