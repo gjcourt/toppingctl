@@ -13,8 +13,8 @@ needed to put things back.
     ./scenes.py --force recall c1
     ./scenes.py recall c2 --dry-run
 
-A recall needs --force, for the same reason: the volume it lands on can't be
-known before recalling, so that is the -10 dB guard (AGENTS.md). If the read
+A recall needs --force: the volume it lands on can't be known before
+recalling, so that is the -10 dB guard (AGENTS.md). If the read
 after it shows the volume above -10 dB, that is printed first.
 
 The DX1 II stores three scenes (C1-C3) behind a different register, 0x7800.

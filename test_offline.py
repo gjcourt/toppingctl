@@ -519,7 +519,10 @@ class Dx5SceneRecallGuardTest(unittest.TestCase):
 
     def test_recall_without_force_is_refused_before_any_io(self):
         self.reads()  # any read raises StopIteration
-        code, _ = self.run_scenes("recall", "c1")
+        with mock.patch.object(
+            toppingctl, "acquire_device_lock", side_effect=AssertionError("locked")
+        ):
+            code, _ = self.run_scenes("recall", "c1")
         self.assertIn("--force", str(code))
         self.assertEqual(self.devices, [])
 
@@ -549,12 +552,30 @@ class Dx5SceneRecallGuardTest(unittest.TestCase):
         self.assertIn("nothing changed", out)
 
     def test_volume_step_sets_the_scale(self):
-        # raw 15 is -7.5 dB on half_db but -15.0 dB on one_db: quiet.
-        self.reads({"volume": 15, "volumeStep": 0}, {"volume": 15, "volumeStep": 1})
+        # raw 15 is -7.5 dB on half_db (loud) but -15.0 dB on one_db (quiet).
+        for step, loud in ((0, True), (1, False)):
+            with self.subTest(volumeStep=step):
+                with mock.patch.object(
+                    self.scenes.devstate,
+                    "by_name",
+                    side_effect=[{"volume": 60}, {"volume": 15, "volumeStep": step}],
+                ):
+                    code, out = self.run_scenes("--force", "recall", "c1")
+                self.assertEqual(code, 0)
+                self.assertEqual("Lower with" in out, loud)
+
+    def test_exactly_minus_10_db_does_not_warn(self):
+        # Same boundary as check_loud: above -10 dB, not at it.
+        self.reads({"volume": 60, "volumeStep": 0}, {"volume": 20, "volumeStep": 0})
         code, out = self.run_scenes("--force", "recall", "c1")
         self.assertEqual(code, 0)
         self.assertNotIn("WARNING", out)
-        self.assertNotIn("Lower with", out)
+
+    def test_read_without_volume_says_volume_unknown(self):
+        self.reads({"volume": 60}, {"inputSource": 2})
+        code, out = self.run_scenes("--force", "recall", "c1")
+        self.assertEqual(code, 0)
+        self.assertIn("volume unknown", out)
 
     def test_quiet_result_does_not_warn(self):
         self.reads({"volume": 60, "volumeStep": 0}, {"volume": 40, "volumeStep": 0})
