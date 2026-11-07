@@ -10,8 +10,12 @@ to know what a slot holds without recalling it. So this snapshots every settings
 field before and after and prints the difference, which is also the information
 needed to put things back.
 
-    ./scenes.py recall c1
+    ./scenes.py --force recall c1
     ./scenes.py recall c2 --dry-run
+
+A recall needs --force, for the same reason: the volume it lands on can't be
+known before recalling, so that is the -10 dB guard (AGENTS.md). If the read
+after it shows the volume above -10 dB, that is printed first.
 
 The DX1 II stores three scenes (C1-C3) behind a different register, 0x7800.
 Its recall needs --unverified, like every DX1 II write, and --force: the
@@ -118,12 +122,7 @@ def dx1_value(index, raw):
 def recall_dx1(a):
     slot = DX1_SLOTS[a.slot]
     print(f"  dx1 scene recall C{slot} (0x{DX1_SCENE_CMD:04x} = {slot})")
-    if not a.dry_run and not a.force:
-        sys.exit(
-            "refusing: a recall can change volume, and what the slot holds can't\n"
-            "be read before recalling it. Pass --force to recall anyway (-10 dB\n"
-            "guard; keep headphones off the first time)."
-        )
+    refuse_unforced(a)
     assert_writable(a)
 
     dev = Device(a.dry_run, "dx1ii", allow_unverified=a.unverified)
@@ -176,6 +175,24 @@ def recall_dx1(a):
     return 0
 
 
+def refuse_unforced(a):
+    if not a.dry_run and not a.force:
+        sys.exit(
+            "refusing: a recall can change volume, and what the slot holds can't\n"
+            "be read before recalling it. Pass --force to recall anyway (-10 dB\n"
+            "guard; keep headphones off the first time)."
+        )
+
+
+def dx5_volume_db(st):
+    """The volume a DX5 II settings read reports, in dB, or None. The raw unit
+    is volumeStep's: 0 = half_db, 1 = one_db (readsettings.volume_step_db)."""
+    raw = st.get("volume")
+    if raw is None:
+        return None
+    return -raw * (1.0 if st.get("volumeStep") == 1 else 0.5)
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -186,7 +203,7 @@ def main():
     ap.add_argument("--device", default="dx5ii", help="dx5ii (default) or dx1ii")
     ap.add_argument("--unverified", action="store_true", help="allow writes to the DX1 II")
     ap.add_argument(
-        "--force", action="store_true", help="DX1 II: recall although the volume can't be known"
+        "--force", action="store_true", help="recall although the volume can't be known"
     )
     a = ap.parse_args()
 
@@ -204,6 +221,7 @@ def main():
 
     cmd = RECALL[a.slot]
     print(f"  {COMMANDS.get(cmd, '?')} (0x{cmd:04x})")
+    refuse_unforced(a)
     if a.dry_run:
         return recall(a, cmd)
     # One lock across the before read, the recall and the after read.
@@ -220,7 +238,20 @@ def recall(a, cmd):
     if a.dry_run:
         return 0
 
-    after = devstate.by_name()
+    try:
+        after = devstate.by_name()
+    except RuntimeError as e:
+        print(f"  volume unknown: the read after the recall failed ({e})")
+        print("  Check the front panel.")
+        return 1
+    db = dx5_volume_db(after)
+    if db is not None and db > VOL_WARN_DB:
+        print(
+            f"\n  WARNING: louder than {VOL_WARN_DB:.0f} dB after the recall: volume {db:+.1f} dB"
+        )
+        print("  Lower with: toppingctl vol -30\n")
+    elif db is None:
+        print("  volume unknown: the read after the recall had no volume -- check the front panel")
     changed = [
         (k, before.get(k), after.get(k))
         for k in sorted(set(before) | set(after))
