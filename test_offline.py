@@ -481,6 +481,116 @@ class Dx1SceneRecallTest(unittest.TestCase):
         self.assertIn("did not confirm", out)
 
 
+class Dx5SceneRecallGuardTest(unittest.TestCase):
+    """scenes.py on the DX5 II: a recall needs --force (the -10 dB guard,
+    Q16), and a loud result is reported before the diff (fake device)."""
+
+    def setUp(self):
+        import scenes
+
+        self.scenes = scenes
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        lockdir = os.path.join(tmp.name, "var-lib-toppingctl")
+        os.mkdir(lockdir)
+        os.chmod(lockdir, 0o755)
+        self.devices = []
+
+        def make_device(*a, **kw):
+            d = FakeDevice(*a, **kw)
+            self.devices.append(d)
+            return d
+
+        for p in (
+            mock.patch.object(scenes, "Device", make_device),
+            mock.patch.object(toppingctl, "LOCK_SYSTEM_DIR", lockdir),
+            mock.patch.object(toppingctl, "CLI_LOCK_WAIT", 0.3),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(lambda: self.assertEqual(toppingctl._lock["depth"], 0))
+
+    run_scenes = Dx1SceneRecallTest.run_scenes
+
+    def reads(self, *states):
+        p = mock.patch.object(self.scenes.devstate, "by_name", side_effect=list(states))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_recall_without_force_is_refused_before_any_io(self):
+        self.reads()  # any read raises StopIteration
+        with mock.patch.object(
+            toppingctl, "acquire_device_lock", side_effect=AssertionError("locked")
+        ):
+            code, _ = self.run_scenes("recall", "c1")
+        self.assertIn("--force", str(code))
+        self.assertEqual(self.devices, [])
+
+    def test_dry_run_needs_no_force(self):
+        code, out = self.run_scenes("recall", "c2", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            [f.hex() for f, _ in self.devices[0].sent], [toppingctl.frame(0x71, 0x12, 1).hex()]
+        )
+
+    def test_loud_result_warns_first(self):
+        before = {"volume": 60, "volumeStep": 0, "inputSource": 1}
+        after = {"volume": 10, "volumeStep": 0, "inputSource": 2}  # -5.0 dB
+        self.reads(before, after)
+        code, out = self.run_scenes("--force", "recall", "c1")
+        self.assertEqual(code, 0)
+        self.assertIn("WARNING: louder than -10 dB after the recall: volume -5.0 dB", out)
+        self.assertIn("Lower with: toppingctl vol -30", out)
+        self.assertLess(out.index("WARNING"), out.index("field(s) changed"))
+
+    def test_loud_result_warns_even_when_nothing_changed(self):
+        st = {"volume": 8, "volumeStep": 1}  # one_db: -8.0 dB
+        self.reads(st, dict(st))
+        code, out = self.run_scenes("--force", "recall", "c2")
+        self.assertEqual(code, 0)
+        self.assertIn("volume -8.0 dB", out)
+        self.assertIn("nothing changed", out)
+
+    def test_volume_step_sets_the_scale(self):
+        # raw 15 is -7.5 dB on half_db (loud) but -15.0 dB on one_db (quiet).
+        for step, loud in ((0, True), (1, False)):
+            with self.subTest(volumeStep=step):
+                with mock.patch.object(
+                    self.scenes.devstate,
+                    "by_name",
+                    side_effect=[{"volume": 60}, {"volume": 15, "volumeStep": step}],
+                ):
+                    code, out = self.run_scenes("--force", "recall", "c1")
+                self.assertEqual(code, 0)
+                self.assertEqual("Lower with" in out, loud)
+
+    def test_exactly_minus_10_db_does_not_warn(self):
+        # Same boundary as check_loud: above -10 dB, not at it.
+        self.reads({"volume": 60, "volumeStep": 0}, {"volume": 20, "volumeStep": 0})
+        code, out = self.run_scenes("--force", "recall", "c1")
+        self.assertEqual(code, 0)
+        self.assertNotIn("WARNING", out)
+
+    def test_read_without_volume_says_volume_unknown(self):
+        self.reads({"volume": 60}, {"inputSource": 2})
+        code, out = self.run_scenes("--force", "recall", "c1")
+        self.assertEqual(code, 0)
+        self.assertIn("volume unknown", out)
+
+    def test_quiet_result_does_not_warn(self):
+        self.reads({"volume": 60, "volumeStep": 0}, {"volume": 40, "volumeStep": 0})
+        code, out = self.run_scenes("--force", "recall", "c1")
+        self.assertEqual(code, 0)
+        self.assertNotIn("WARNING", out)
+        self.assertIn("1 field(s) changed", out)
+
+    def test_failed_read_after_recall_says_volume_unknown(self):
+        self.reads({"volume": 60}, RuntimeError("device returned no settings records"))
+        code, out = self.run_scenes("--force", "recall", "c1")
+        self.assertEqual(code, 1)
+        self.assertIn("volume unknown", out)
+
+
 class MuteBitmaskTest(unittest.TestCase):
     """Review #16: frame 7 of the 0x810a block is a bitmask (bit0 = analog
     muted, bit1 = opt muted). The fix replaced a 1/0 on/off write -- which
