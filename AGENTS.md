@@ -25,8 +25,10 @@ If the two disagree, the spec was tested against hardware and this was not.
 - **Every entry point that opens the device takes the device lock** in its
   `main()`, once per command: `with cli_device_lock(write=...)` from
   `toppingctl.py`. The device grants one handle; the lock keeps the CLI scripts
-  and the planned agent from interleaving. `--dry-run` paths that open nothing
-  skip it. Library code (`devstate`, `Device`) never takes it.
+  and the agent from interleaving. `--dry-run` paths that open nothing
+  skip it. Library code (`devstate`, `Device`) never takes it. The agent,
+  `toppingd.py`, is the one exception to "in `main()`": it is long-running, so it
+  takes the lock once per operation, waiting 2 s, and answers `423 busy`.
 - **Only write registers confirmed in the spec.** Factory Reset lives in the same
   register space; blind sweeps are not safe. Read-only probing is.
 
@@ -52,7 +54,8 @@ refuses a frame that isn't listed there.
   CI runs both plus dry-run exercises of every frame builder, so CI needs no
   hardware.
 - `python3 -m unittest test_offline` runs offline regression tests (no
-  hardware; needs `hid` importable). CI runs them on both matrix
+  hardware; needs `hid` and `pyyaml` importable). It also loads
+  `test_toppingd.py`, the agent's API tests against a fake HID device. CI runs them on both matrix
   interpreters (3.11 and 3.14) — add a test there for any bug fix.
 - Branch and PR for every change. Never commit to `main`.
 - Presets in `presets/`, third-party measurement data in `measurements/` —

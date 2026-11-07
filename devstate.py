@@ -156,7 +156,7 @@ DX1_STATE_QUERIES = {
 }
 
 
-def dx1_state(dev_key="dx1ii", *, skip_peq_dump=False):
+def dx1_state(dev_key="dx1ii", *, skip_peq_dump=False, h=None):
     """Everything the DX1 II will safely say about itself, decoded by
     readsettings. Queries are restricted to the vendor's read-safe register
     list (DX1_VENDOR_READ_SAFE; see dx1_query -- anything else turns the
@@ -169,8 +169,13 @@ def dx1_state(dev_key="dx1ii", *, skip_peq_dump=False):
     skip_peq_dump=True leaves out the 0x1106 dump, so every frame sent is in
     CONFIRMED_READS. "configs" is then None -- not read,
     as opposed to [] for a dump that returned nothing. The agent always
-    skips it: 0x1106's read-safety is one contributor's unmeasured claim."""
-    h = open_checked(dev_key)
+    skips it: 0x1106's read-safety is one contributor's unmeasured claim.
+
+    With h, read through that already-open handle and leave it open, as
+    read_settings does. Without h, open one and close it."""
+    own = h is None
+    if own:
+        h = open_checked(dev_key)
     try:
         blk = dx1_read_block(h)
         regs = {}
@@ -179,7 +184,8 @@ def dx1_state(dev_key="dx1ii", *, skip_peq_dump=False):
         configs = None if skip_peq_dump else dx1_read_configs(h)
         return {"block": blk, "regs": regs, "configs": configs}
     finally:
-        h.close()
+        if own:
+            h.close()
 
 
 def read_settings(dev_key="dx5ii", secs=2.0, *, h=None):
