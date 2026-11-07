@@ -6,15 +6,19 @@
 <meta name="color-scheme" content="light dark">
 <title>toppingctl rooms — prototype r2 (sample data)</title>
 <!--
-  Prototype r2 for TOPPINGCTL-10. A single self-contained file: no network
-  requests, nothing talks to a DAC. Every room, host and value is invented.
-  r1 (prototype-r1.html) is kept unchanged.
+  Prototype r2: TOPPINGCTL-10 (volume without a preview), completed for the
+  architecture plan's build step 3 by TOPPINGCTL-12 (gain, the room states,
+  the "DAC volume" label, wake reading the level back). A single self-contained
+  file: no network requests, nothing talks to a DAC. Every room, host and value
+  is invented. r1 (prototype-r1.html) is kept unchanged.
 
   Volume changes send without a preview: the UI shows the target at once, sends
   the latest target after 300 ms of quiet, keeps one write in flight per room,
   and the (simulated) agent re-reads the device before each write. The -10 dB
-  unlock is a checkbox that lasts 60 s: it ends at the cap, on
-  Cancel, or on leaving the room. Presets and power keep the preview bar.
+  unlock is a checkbox that lasts 60 s: it ends at the cap, on Cancel, on
+  unticking, or on leaving the room. Gain, presets and power keep the preview
+  bar; high gain needs the same unlock (decision 8). Scene recall is absent
+  (Q15).
 -->
 <style>
   :root {
@@ -63,10 +67,12 @@
   .row .grow { flex: 1; }
   .title { font-weight: 650; font-size: 18px; }
   .sub { color: var(--muted); font-size: 14px; }
+  .label { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .04em; margin-top: 8px; }
   .big { font-size: 30px; font-weight: 650; }
   .pill { font-size: 13px; padding: 2px 8px; border-radius: 999px; border: 1px solid currentColor; white-space: nowrap; }
   .pill.ok { color: var(--ok); }
   .pill.bad { color: var(--bad); }
+  .pill.warn { color: var(--warn); }
   .pill.view { color: var(--muted); }
   .stale .val { color: var(--muted); }
   .prov { font-size: 13px; color: var(--muted); }
@@ -78,6 +84,7 @@
   .banner.bad { background: var(--bad-bg); color: var(--bad); }
   .banner.warn { background: var(--warn-bg); color: var(--warn); }
   .banner.info { background: var(--off-bg); color: var(--ink); }
+  .banner button { margin-top: 8px; }
   h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 22px 0 6px; }
   .stepper { display: grid; grid-template-columns: 64px 1fr 64px; gap: 10px; align-items: center; margin-top: 10px; }
   .stepper button { font-size: 22px; padding: 0; height: 56px; }
@@ -126,9 +133,13 @@
 const MINUS = "−";
 const SAFE_MAX = -10;      // AGENTS.md: above -10 dB needs an explicit force
 const VOL_MIN = -99;
+const LOWER_TO = -30;      // the one-tap "Lower to -30 dB" (design rule 5, Q13)
 const DEBOUNCE_MS = 300;   // quiet time before the latest volume target is sent
 const UNLOCK_S = 60;       // the "Allow above −10 dB" checkbox times out
+const BUSY_MS = 8000;      // how long the sample CLI holds the Office lock
+const UNLOCK_LABEL = "Allow above " + MINUS + "10 dB for 60 s";
 const LOUD_MSG = "Above " + MINUS + "10 dB needs “Allow above " + MINUS + "10 dB” first.";
+const DAC_VOL_DEF = "The DAC's own volume. Snapcast and Home Assistant set a second level in series that this page doesn't show, so this isn't the level at your ears.";
 
 // Real preset files from presets/ (names from presets/README.md). Which one a
 // room "has" is invented sample data.
@@ -141,35 +152,69 @@ const PRESETS = [
 
 const VIEW_ONLY = "View only: this model isn't confirmed for toppingctl.";
 
-// `dev` is what the simulated device holds. The UI never reads it directly:
-// it learns the value only through a read, as the agent does.
+// The room states from the architecture plan, "Room states". The words on the
+// pill and in the one-line reason are the plan's.
+const STATES = {
+  ok: { pill: "Reachable", cls: "ok" },
+  notread: { pill: "Not read", cls: "view" },
+  down: { pill: "Unreachable", cls: "bad" },
+  busy: { pill: "DAC busy", cls: "warn" },
+  nodac: { pill: "No DAC", cls: "bad" },
+  unrecognised: { pill: "Unrecognised DAC", cls: "view" },
+  different: { pill: "Different DAC", cls: "warn" },
+  readfail: { pill: "Read failed", cls: "bad" },
+};
+
+const unknown = (why) => ({ v: null, src: "unknown", why });
+const NOT_READ = "not read: no confirmed read path for this model";
+
+// `dev`, `devGain` and `devPower` are what the simulated device holds. The UI
+// never reads them directly: it learns them only through a read, as the agent does.
 function sampleRooms() {
   return [
-    { id: "office", name: "Office", model: "Topping DX5 II", host: "office-audio", status: "confirmed", reach: "ok",
-      dev: -32,
+    { id: "office", name: "Office", model: "Topping DX5 II", host: "office", status: "confirmed", state: "ok",
+      dev: -32, devGain: "Low", devPower: "Awake",
       vol: { v: -32, src: "read", age: "12 s ago" }, step: { v: 0.5, src: "read" },
       output: { v: "Headphones, balanced", hp: true },
+      gain: { v: "Low", src: "read", age: "12 s ago" },
       power: { v: "Awake", src: "read", age: "12 s ago" },
       preset: { v: "e3-oratory-harman-oe", src: "written", age: "2 h ago" },
       preamp: { v: -1.1, src: "written", age: "2 h ago" } },
-    { id: "living", name: "Living room", model: "Topping DX5 II", host: "living-audio", status: "confirmed", reach: "ok",
-      dev: -26.5,
-      vol: { v: -24, src: "written", age: "3 days ago" }, step: { v: null, src: "unknown" },
-      output: { v: "Line out, balanced", hp: false },
-      power: { v: null, src: "unknown" },
-      preset: { v: null, src: "unknown" }, preamp: { v: null, src: "unknown" } },
-    { id: "bedroom", name: "Bedroom", model: "Topping DX1 II", host: "bedroom-audio", status: "unverified", reach: "ok",
+    { id: "living", name: "Living room", model: "Topping D90 III Discrete", host: "living-room", status: "unverified", state: "notread",
+      product: "D90 III Discrete (sample product string)",
+      vol: unknown(NOT_READ), step: unknown(NOT_READ), output: { v: null }, gain: unknown(NOT_READ),
+      power: unknown(NOT_READ), preset: unknown(NOT_READ), preamp: unknown(NOT_READ) },
+    { id: "bedroom", name: "Bedroom", model: "Topping DX1 II", host: "bedroom", status: "unverified", state: "ok",
       dev: -40,
-      vol: { v: -40, src: "read", age: "8 s ago" }, step: { v: null, src: "unknown" },
+      vol: { v: -40, src: "read", age: "8 s ago" }, step: unknown(),
       output: { v: "Headphones", hp: true },
-      power: { v: null, src: "unknown" },
-      preset: { v: null, src: "unknown" }, preamp: { v: null, src: "unknown" } },
-    { id: "studio", name: "Studio", model: "Topping DX5 II", host: "studio-audio", status: "confirmed", reach: "down",
-      lastSeen: "3 h ago, at 14:02", dev: -35,
-      vol: { v: -35, src: "read", age: "3 h ago" }, step: { v: 0.5, src: "read" },
+      gain: unknown("not read: write-only on this model"),
+      power: unknown(), preset: unknown(), preamp: unknown() },
+    { id: "den", name: "Den", model: "Topping DX5 II", host: "den", status: "confirmed", state: "busy",
+      holder: "the toppingctl CLI", dev: -28,
+      vol: { v: -28, src: "read", age: "40 s ago" }, step: { v: 0.5, src: "read" },
+      output: { v: "Line out, balanced", hp: false },
+      gain: { v: "Low", src: "read", age: "40 s ago" },
+      power: { v: "Awake", src: "read", age: "40 s ago" },
+      preset: { v: "flat", src: "written", age: "1 day ago" }, preamp: unknown() },
+    { id: "studio", name: "Studio", model: "Topping DX5 II", host: "studio", status: "confirmed", state: "down",
+      lastSeen: "14 min ago", dev: -35,
+      vol: { v: -35, src: "read", age: "14 min ago" }, step: { v: 0.5, src: "read" },
       output: { v: "Line out, single-ended", hp: false },
-      power: { v: null, src: "unknown" },
-      preset: { v: "flat", src: "written", age: "5 days ago" }, preamp: { v: null, src: "unknown" } },
+      gain: { v: "Low", src: "read", age: "14 min ago" },
+      power: { v: "Awake", src: "read", age: "14 min ago" },
+      preset: { v: "flat", src: "written", age: "5 days ago" }, preamp: unknown() },
+    { id: "kitchen", name: "Kitchen", model: "Unrecognised", host: "kitchen", status: "unknown", state: "unrecognised",
+      product: "D50s (sample product string)",
+      vol: unknown("not read: this DAC isn't in toppingctl's model list"), step: unknown(), output: { v: null },
+      gain: unknown("not read"), power: unknown("not read"), preset: unknown("not read"), preamp: unknown("not read") },
+    { id: "guest", name: "Guest room", model: "Topping D90 III Discrete", host: "guest", status: "unverified", state: "different",
+      expect: "Topping DX5 II",
+      vol: unknown(NOT_READ), step: unknown(), output: { v: null }, gain: unknown(NOT_READ),
+      power: unknown(NOT_READ), preset: unknown(NOT_READ), preamp: unknown(NOT_READ) },
+    { id: "snaptest", name: "snap-test", model: "No DAC", host: "snap-test", status: "unknown", state: "nodac",
+      vol: unknown("no DAC"), step: unknown(), output: { v: null }, gain: unknown("no DAC"),
+      power: unknown("no DAC"), preset: unknown("no DAC"), preamp: unknown("no DAC") },
   ];
 }
 
@@ -182,7 +227,7 @@ function reset() {
   }
   S = { view: "signin", room: null, rooms: sampleRooms(), pending: null, sending: false,
         unlock: false, unlockSeq: 0, unlockLeft: 0, unlockTimer: null, unlockNote: "",
-        failNext: false, typed: "", typedErr: "", framesOpen: false, said: null, toast: null };
+        failNext: false, readFailNext: false, typed: "", typedErr: "", framesOpen: false, said: null, toast: null };
   S.rooms.forEach((r) => { r.ui = newRoomUi(); });
 }
 reset();
@@ -190,7 +235,10 @@ reset();
 const $ = (s) => document.querySelector(s);
 const esc = (s) => (s === null || s === undefined ? "Unknown" : String(s)).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const room = () => S.rooms.find((r) => r.id === S.room);
-const writable = (r) => r.status === "confirmed" && r.reach === "ok";
+const writable = (r) => r.status === "confirmed" && r.state === "ok";
+const asleep = (r) => r.power.v === "Asleep";
+const canVol = (r) => writable(r) && !asleep(r);
+const anyVolumeOpen = () => S.rooms.some((x) => x.ui.flight !== null || x.ui.want !== null);
 function db(v) {
   if (v === null || v === undefined) return "Unknown";
   return (v < 0 ? MINUS : v > 0 ? "+" : "") + Math.abs(v).toFixed(1) + " dB";
@@ -201,15 +249,40 @@ function plain(html) { const d = document.createElement("div"); d.innerHTML = ht
 function presetName(id) { const p = PRESETS.find((x) => x.id === id); return p ? p.name : "Unknown"; }
 
 function prov(f, r) {
-  const last = r && r.reach === "down" ? " · last known" : "";
+  const last = r && (r.state === "down" || r.state === "busy") ? " · last known" : "";
   if (f.src === "read") return `<span class="prov"><span class="dot read"></span>Read from device · ${esc(f.age)}${last}</span>`;
   if (f.src === "written") return `<span class="prov"><span class="dot written"></span>Last written by toppingctl · ${esc(f.age)} · may be stale${last}</span>`;
-  return `<span class="prov"><span class="dot unknown"></span>Unknown · not read yet</span>`;
+  return `<span class="prov"><span class="dot unknown"></span>Unknown · ${esc(f.why || "not read yet")}</span>`;
 }
 
-function reachPill(r) {
-  if (r.reach === "down") return `<span class="pill bad">Unreachable</span>`;
-  return `<span class="pill ok">Reachable</span>`;
+function statePill(r) {
+  const s = STATES[r.state];
+  return `<span class="pill ${s.cls}">${s.pill}</span>`;
+}
+
+// One line saying why the room is in its state, in the plan's words.
+function stateLine(r) {
+  switch (r.state) {
+    case "notread": return `${r.model} · ${NOT_READ}.`;
+    case "down": return `Unreachable · ${r.host} · last seen ${r.lastSeen}.`;
+    case "busy": return `DAC busy · in use by ${r.holder} on ${r.host}. The page checks again every 10 s.`;
+    case "nodac": return `No DAC found on ${r.host}. Its agent answers, but no Topping DAC is plugged in.`;
+    case "unrecognised": return `Unrecognised DAC: ${r.product}. Read-only.`;
+    case "different": return `Different DAC than expected: ${r.model}. rooms.yaml expects a ${r.expect}. Read-only until rooms.yaml is edited.`;
+    case "readfail": return `Read failed: ${r.readErr}. Values are unknown until a read works.`;
+    default: return "";
+  }
+}
+
+// Why a control is disabled, for the line under it.
+function whyCant(r) {
+  if (r.state === "down") return "Can't change: the host isn't answering. Nothing is queued for when it comes back.";
+  if (r.state === "busy") return "Can't change while the DAC is busy. The controls come back when it's free.";
+  if (r.state === "readfail") return "Can't change until a read works: every change starts from a fresh read.";
+  if (r.state !== "ok") return "Read-only: " + stateLine(r);
+  if (r.status !== "confirmed") return VIEW_ONLY;
+  if (asleep(r)) return `Asleep. Wake ${r.name} to change this.`;
+  return "";
 }
 
 // --- views -----------------------------------------------------------------
@@ -226,17 +299,26 @@ function viewSignin() {
 
 function viewList() {
   const cards = S.rooms.map((r) => {
-    const down = r.reach === "down";
-    const pre = r.preset.v ? presetName(r.preset.v) + " (last written)" : "EQ preset unknown";
+    const dim = r.state === "down" || r.state === "busy";
+    const line = stateLine(r);
+    const bad = r.state === "down" || r.state === "readfail" || r.state === "nodac";
+    let values = "";
+    if (r.vol.v !== null) {
+      const pre = r.preset.v ? presetName(r.preset.v) + " (last written)" : "EQ preset unknown";
+      values = `<div class="label">DAC volume</div>
+        <div class="row"><span class="big num val">${esc(db(r.vol.v))}</span>${asleep(r) ? `<span class="sub">asleep</span>` : ""}</div>
+        <div>${prov(r.vol, r)}</div>
+        <div class="sub val" style="margin-top:6px">${esc(r.output.v || "Output unknown")} · ${esc(pre)}</div>`;
+    } else if (r.state === "ok" || r.state === "readfail") {
+      values = `<div class="label">DAC volume</div><div class="val">Unknown</div><div>${prov(r.vol, r)}</div>`;
+    }
     return `
-    <a class="card ${down ? "stale" : ""}" href="#${r.id}" data-act="open" data-id="${r.id}">
+    <a class="card ${dim ? "stale" : ""}" href="#${r.id}" data-act="open" data-id="${r.id}">
       <div class="row"><span class="title grow">${esc(r.name)}</span>
-        ${r.status !== "confirmed" ? `<span class="pill view">View only</span>` : ""} ${reachPill(r)}</div>
-      <div class="sub">${esc(r.model)} · ${esc(r.host)}</div>
-      ${down ? `<div class="err">No answer from ${esc(r.host)} since ${esc(r.lastSeen)}.</div>` : ""}
-      <div class="row" style="margin-top:8px"><span class="big num val">${esc(db(r.vol.v))}</span></div>
-      <div>${prov(r.vol, r)}</div>
-      <div class="sub val" style="margin-top:6px">${esc(r.output.v || "Output unknown")} · ${esc(pre)}</div>
+        ${r.state === "ok" && r.status !== "confirmed" ? `<span class="pill view">View only</span>` : ""} ${statePill(r)}</div>
+      <div class="sub">${esc(r.model === "No DAC" || r.model === "Unrecognised" ? r.host : r.model + " · " + r.host)}</div>
+      ${line ? `<div class="${bad ? "err" : "sub"}" style="margin-top:4px">${esc(line)}</div>` : ""}
+      ${values}
     </a>`;
   }).join("");
   return `
@@ -246,25 +328,46 @@ function viewList() {
 
 function viewRoom() {
   const r = room();
-  const w = writable(r);
   let banner = "";
-  if (r.reach === "down") {
-    banner = `<div class="banner bad" role="status"><strong>Unreachable.</strong> ${esc(r.host)} hasn't answered since ${esc(r.lastSeen)}.
+  if (r.state === "down") {
+    banner = `<div class="banner bad" role="status"><strong>Unreachable.</strong> ${esc(r.host)} hasn't answered for ${esc(r.lastSeen)}.
       The values below are the last known ones, and nothing can be changed until it answers.</div>`;
+  } else if (r.state === "busy") {
+    banner = `<div class="banner warn" role="status"><strong>DAC busy.</strong> In use by ${esc(r.holder)} on ${esc(r.host)}.
+      The values below are from the last read, and nothing can be changed until it's free. The page checks again every 10 s.</div>`;
+  } else if (r.state === "readfail") {
+    banner = `<div class="banner bad" role="status"><strong>Read failed.</strong> ${esc(r.readErr)}.
+      The values are unknown until a read works, so nothing can be changed. <br><button data-act="read" ${r.reading ? "disabled" : ""}>${r.reading ? "Reading " + esc(r.host) + "…" : "Read " + esc(r.name) + " again"}</button></div>`;
+  } else if (r.state !== "ok") {
+    banner = `<div class="banner info" role="status"><strong>${STATES[r.state].pill}.</strong> ${esc(stateLine(r))}
+      This page can't change anything here.</div>`;
   } else if (r.status !== "confirmed") {
     banner = `<div class="banner info"><strong>View only.</strong> The ${esc(r.model)} isn't confirmed for toppingctl, so this page can't change anything on it.</div>`;
+  } else if (asleep(r)) {
+    banner = `<div class="banner info" role="status"><strong>Asleep</strong>, as last sent from this page. What the DAC reports while asleep hasn't been measured yet, so the values below are from before it slept. Wake it to change anything.</div>`;
+  }
+  const identity = r.product ? `${esc(r.product)} · ${esc(r.host)}` : `${esc(r.model)} · ${esc(r.host)}`;
+  if (r.state === "nodac") {
+    return `
+    <header><button data-act="back" aria-label="Back to rooms">‹ Rooms</button>
+      <div style="flex:1"><h1>${esc(r.name)}</h1><div class="sub">${esc(r.host)}</div></div>${statePill(r)}</header>
+    ${banner}
+    <div class="card"><div>No Topping DAC is plugged into ${esc(r.host)}, and no other unrecognised USB audio device was found. Plug the DAC in; the page notices on its next check.</div>
+      <div class="why">If the DAC is plugged into another computer, this is what the page shows.</div></div>`;
   }
   return `
   <header><button data-act="back" aria-label="Back to rooms" ${S.sending ? "disabled" : ""}>‹ Rooms</button>
-    <div style="flex:1"><h1>${esc(r.name)}</h1><div class="sub">${esc(r.model)} · ${esc(r.host)}</div></div>${reachPill(r)}</header>
+    <div style="flex:1"><h1>${esc(r.name)}</h1><div class="sub">${identity}</div></div>${statePill(r)}</header>
   ${banner}
   ${S.toast && S.toast.room === r.id ? `<div class="banner ${S.toast.kind}" id="toast">${S.toast.html}</div>` : ""}
-  <h2>Volume</h2>
-  <div class="card ${r.reach === "down" ? "stale" : ""}" id="volcard">${volumeCard(r, w)}</div>
+  <h2>DAC volume</h2>
+  <div class="card ${r.state === "down" || r.state === "busy" ? "stale" : ""}" id="volcard">${volumeCard(r)}</div>
+  <h2>Headphone gain</h2>
+  <div class="card">${gainBlock(r)}</div>
   <h2>Power</h2>
-  <div class="card">${powerBlock(r, w)}</div>
+  <div class="card">${powerBlock(r)}</div>
   <h2>EQ preset</h2>
-  <div class="card">${presetBlock(r, w)}</div>`;
+  <div class="card">${presetBlock(r)}</div>`;
 }
 
 // --- volume: send without a preview, debounced ------------------------------
@@ -319,8 +422,12 @@ function flush(r) {
   r.ui.msg = { kind: "sending" };
   refreshVolume();
   say("Sending " + db(to) + " to " + r.host + ".");
-  // Agent side: read the device, check it, write, read back.
+  // Agent side: take the device lock, read the device, check it, write, read back.
   setTimeout(() => {
+    if (r.state === "busy") {
+      return settle(r, { kind: "refused",
+        text: `DAC busy: ${r.name} is in use by ${r.holder}. Set the level again when it's free.` });
+    }
     const fresh = r.dev, readAt = clock();
     if (fresh !== expected) {
       return settle(r, { kind: "refused", fresh, readAt,
@@ -348,7 +455,7 @@ function settle(r, res) {
     if (r.ui.want !== null) { flush(r); refreshVolume(); return; }   // input that arrived during the write goes next
     r.ui.undoTo = r.ui.burstBase !== r.vol.v ? r.ui.burstBase : null;
   } else {
-    r.vol = { v: res.fresh, src: "read", age: "at " + res.readAt };
+    if (res.fresh !== undefined) r.vol = { v: res.fresh, src: "read", age: "at " + res.readAt };  // a busy refusal read nothing
     r.ui.msg = res;
     r.ui.want = null;               // input typed against the old value is dropped
     clearTimeout(r.ui.timer); r.ui.timer = null;
@@ -375,6 +482,7 @@ function setUnlock(on) {
     S.unlockLeft -= 1;
     if (S.unlockLeft <= 0) { relock(); S.unlockNote = `The unlock ran out after ${UNLOCK_S} s.`; say(S.unlockNote); }
     refreshVolume();
+    refreshBarUnlock();
   }, 1000);
 }
 function relock() {
@@ -383,28 +491,37 @@ function relock() {
   renderPending();
 }
 
-function volumeCard(r, w) {
+// "Lower to -30 dB" goes at once: no unlock (it's quieter) and no quiet time.
+function lowerNow(r) {
+  request(r, LOWER_TO);
+  if (r.ui.want !== null && r.ui.flight === null) { clearTimeout(r.ui.timer); flush(r); }
+  if (S.toast && S.toast.room === r.id && S.toast.loud) { S.toast = null; render(); }
+}
+
+function volumeCard(r) {
   let html = `<div class="big num" id="vol-now">${esc(db(r.vol.v))}</div>
-    <div id="vol-prov">${prov(r.vol, r)}</div>`;
-  if (!w) {
-    const why = r.reach === "down" ? "Can't change: the host isn't answering." : VIEW_ONLY;
-    if (r.vol.v === null) return html + `<div class="why">${why}</div>`;
+    <div id="vol-prov">${prov(r.vol, r)}</div>
+    <div class="why">${DAC_VOL_DEF}</div>`;
+  if (!canVol(r)) {
+    const why = whyCant(r);
+    if (r.vol.v === null) return html + `<div class="why">${esc(why)}</div><div id="vol-status"></div>`;
     return html + `<div class="stepper">
       <button disabled aria-label="${esc(r.name)}: quieter">${MINUS}</button>
-      <input type="range" disabled aria-label="${esc(r.name)} volume" min="${VOL_MIN}" max="0" value="${r.vol.v}">
+      <input type="range" disabled aria-label="${esc(r.name)} DAC volume" min="${VOL_MIN}" max="0" value="${r.vol.v}">
       <button disabled aria-label="${esc(r.name)}: louder">+</button>
-    </div><div class="why">${why}</div>`;
+    </div><div class="why">${esc(why)}</div><div id="vol-status"></div>`;
   }
   html += `<div style="margin-top:8px"><button data-act="read" ${r.reading || r.ui.flight !== null ? "disabled" : ""}>${r.reading ? "Reading " + esc(r.host) + "…" : "Read " + esc(r.name) + " now"}</button></div>`;
   if (r.vol.v === null) {
-    return html + `<div class="why">The level isn't known yet. Read the device before changing it.</div>`;
+    return html + `<div class="why">The level isn't known yet. Read the device before changing it.</div><div id="vol-status"></div>`;
   }
   const step = r.step.v;
   return html + `
+    <div id="vol-loud"></div>
     <div class="stepper">
       <button id="vol-down" data-act="step" data-dir="-1" aria-label="${esc(r.name)}: quieter, ${step === null ? "step unknown" : `by ${step} dB`}">${MINUS}</button>
       <div>
-        <input type="range" id="slider" min="${VOL_MIN}" aria-label="${esc(r.name)} volume">
+        <input type="range" id="slider" min="${VOL_MIN}" aria-label="${esc(r.name)} DAC volume">
         <div class="scale num"><span>${MINUS}99 dB</span><span id="vol-cap"></span></div>
       </div>
       <button id="vol-up" data-act="step" data-dir="1" aria-label="${esc(r.name)}: louder, ${step === null ? "step unknown" : `by ${step} dB`}">+</button>
@@ -419,7 +536,7 @@ function volumeCard(r, w) {
     <div id="tgt-err" class="err">${esc(S.typedErr)}</div>
     <div id="vol-status"></div>
     <label class="check"><input type="checkbox" id="unlock" ${S.unlock ? "checked" : ""}>
-      <span>Allow above ${MINUS}10 dB for 60 s${r.output.hp ? " <strong>(output is headphones)</strong>" : ""}</span></label>
+      <span>${UNLOCK_LABEL}${r.output.hp ? " <strong>(output is headphones)</strong>" : ""}</span></label>
     <div id="unlock-note" class="why"></div>`;
 }
 
@@ -452,8 +569,9 @@ function refreshVolume() {
   if (!r || S.view !== "room" || !$("#vol-now")) return;
   $("#vol-now").textContent = db(r.vol.v);
   $("#vol-prov").innerHTML = prov(r.vol, r);
+  $("#vol-status").innerHTML = statusHtml(r);
   const slider = $("#slider");
-  if (!slider) return;
+  if (!canVol(r) || r.vol.v === null || !slider) return;
   const shown = displayed(r), cap = capOf(r.vol.v), step = r.step.v;
   slider.max = Math.max(cap, shown);
   slider.step = step || 0.5;
@@ -467,10 +585,15 @@ function refreshVolume() {
   $("#vol-step-note").textContent = step === null
     ? "The step size hasn't been read yet. Read the device before changing the level."
     : `Steps of ${step} dB, from the device's volumeStep. The step is read again before each write.`;
-  $("#vol-status").innerHTML = statusHtml(r);
+  // Design rule 5: whenever a read shows the room above -10 dB, offer the way down first.
+  const wokeLoud = S.toast && S.toast.room === r.id && S.toast.loud;   // the wake message already offers it
+  const loud = r.vol.v > SAFE_MAX && r.ui.flight === null && r.ui.want === null && !wokeLoud;
+  $("#vol-loud").innerHTML = loud
+    ? `<div class="banner warn">${esc(r.name)} reads ${esc(db(r.vol.v))}, above ${MINUS}10 dB. <br><button class="primary" data-act="lower">Lower to ${MINUS}30 dB now</button></div>`
+    : "";
   $("#unlock").checked = S.unlock;
   $("#unlock-note").textContent = S.unlock
-    ? `Allowed above ${MINUS}10 dB for ${S.unlockLeft} more s. It locks at the cap, on Cancel, or when you leave the room.`
+    ? `Allowed above ${MINUS}10 dB for ${S.unlockLeft} more s. It locks at the cap, on Cancel, when you untick it, leave the room or sign out.`
     : S.unlockNote;
   $("#tgt-err").textContent = S.typedErr;
 }
@@ -495,33 +618,62 @@ function echoTarget(text) {
   return typeof v === "number" ? "Reads as " + db(v) + "." : "";
 }
 
-function powerBlock(r, w) {
+// --- gain: preview first; switching to high needs the unlock (decision 8) ----
+
+function gainBlock(r) {
+  const g = r.gain;
+  let html = `<div class="row"><span class="grow">${g.v === null ? "Unknown" : esc(g.v) + " gain"}</span></div><div>${prov(g, r)}</div>
+    <div class="why">Gain applies to the headphone output${r.output.v ? ` (now: ${esc(r.output.v)})` : ""}. High gain counts as loud, like going above ${MINUS}10 dB.</div>`;
+  const why = whyCant(r);
+  if (why) return html + `<div class="why">${esc(why)}</div>`;
+  return html + `<div class="pair">
+      <button data-act="gain" data-to="Low" ${g.v === "Low" ? "disabled" : ""}>Low gain</button>
+      <button data-act="gain" data-to="High" ${g.v === "High" ? "disabled" : ""}>High gain</button></div>
+    <div class="why">Gain changes show a preview before anything is sent.</div>`;
+}
+
+function stageGain(to) {
+  const r = room();
+  S.pending = { kind: "gain", to, from: r.gain.v,
+    what: `${to} gain on ${r.name}`,
+    note: (r.gain.v === null ? "Current gain unknown. The page hasn't read it, so it can't say whether this changes anything. " : "") +
+      (to === "High" ? `High gain makes everything on the headphone output louder at the same ${MINUS}dB setting.` : ""),
+    frames: `gain register 71 17 = ${to === "High" ? 1 : 0} (${to.toLowerCase()}), then the 71 34 commit. Two frames.` };
+}
+
+// --- power: preview first, then read after waking (Q13) ---------------------
+
+function powerBlock(r) {
   const p = r.power;
-  let html = `<div class="row"><span class="grow">${esc(p.v ?? "Unknown")}</span></div><div>${prov(p, r)}</div>
-    <div class="why">The power state shows where it came from, as volume does. What the DAC reports while asleep hasn't been measured yet (architecture plan, step 2).</div>`;
-  if (!w) return html + `<div class="why">${r.reach === "down" ? "Can't change: the host isn't answering." : VIEW_ONLY}</div>`;
+  let html = `<div class="row"><span class="grow">${esc(p.v ?? "Unknown")}</span></div><div>${prov(p, r)}</div>`;
+  const why = r.state !== "ok" || r.status !== "confirmed" ? whyCant(r) : "";
+  if (why) return html + `<div class="why">${esc(why)}</div>`;
   return html + `<div class="pair">
       <button data-act="power" data-to="sleep" ${p.v === "Asleep" ? "disabled" : ""}>Sleep ${esc(r.name)}</button>
       <button data-act="power" data-to="wake" ${p.v === "Awake" ? "disabled" : ""}>Wake ${esc(r.name)}</button></div>
-    <div class="why">Sleep and wake show a preview before anything is sent.</div>`;
+    <div class="why">Sleep and wake show a preview before anything is sent. Waking resumes the level the DAC stored, so the page reads it straight after.</div>`;
 }
 
 function stagePower(sleep) {
   const r = room();
   S.pending = { kind: "power", to: sleep ? "sleep" : "wake",
     what: sleep ? `Put ${r.name} to sleep` : `Wake ${r.name}`,
-    note: r.power.v === null ? "Current power state unknown. The page hasn't read it, so it can't say whether this changes anything." : "",
+    note: r.power.v === null ? "Current power state unknown. The page hasn't read it, so it can't say whether this changes anything." :
+      sleep ? "" : `Waking resumes the level the DAC stored, which may not be the ${db(r.vol.v)} read before it slept. The page reads it after waking.`,
     frames: `power register 71 01 = ${sleep ? 0 : 1} (${sleep ? "sleep" : "wake"}), with the checksum the device requires. One frame; no commit.` };
 }
 
-function presetBlock(r, w) {
+// --- presets ------------------------------------------------------------------
+
+function presetBlock(r) {
   const cur = r.preset.v;
   let html = `<div>${cur ? "Current: <strong>" + esc(presetName(cur)) + "</strong>" : "Current: <strong>Unknown</strong>"}</div>
     <div>${prov(r.preset, r)}</div>
     <div class="row" style="margin-top:6px"><span class="sub">Preamp</span><span class="num">${esc(db(r.preamp.v))}</span></div>
     <div>${prov(r.preamp, r)}</div>
     <div class="why">The DAC doesn't store preset names, so this is what toppingctl last wrote. Anything changed since on the front panel or in the vendor app won't show here.</div>`;
-  if (!w) return html + `<div class="why">${r.reach === "down" ? "Can't change: the host isn't answering." : VIEW_ONLY}</div>`;
+  const why = whyCant(r);
+  if (why) return html + `<div class="why">${esc(why)}</div>`;
   html += `<fieldset style="border:none;padding:0;margin:8px 0 0"><legend class="sub">Apply a preset (shows a preview first)</legend>` +
     PRESETS.map((p) => {
       const sel = S.pending && S.pending.kind === "preset" ? S.pending.to === p.id : false;
@@ -561,7 +713,14 @@ function presetNeedsUnlock(r, to, level) {
   const rise = to.pre - r.preamp.v;
   return rise > 0 && (level === null || level + rise > SAFE_MAX);
 }
-function loudReason(r) {
+// Does the staged change need "Allow above -10 dB"? High gain always does (decision 8).
+function pendingIsLoud(r, p) {
+  if (p.kind === "gain") return p.to === "High";
+  if (p.kind === "preset") return presetNeedsUnlock(r, PRESETS.find((x) => x.id === p.to), r.vol.v);
+  return false;
+}
+function loudReason(r, p) {
+  if (p.kind === "gain") return "high gain counts as loud";
   if (r.preamp.v === null) return "the current preamp isn't known, so this preset counts as loud";
   if (r.vol.v === null) return "the level isn't known, so this preset counts as loud";
   return `this preset would take the level above ${MINUS}10 dB`;
@@ -572,18 +731,25 @@ function renderPending() {
   const p = S.pending;
   if (!p || S.view !== "room") { el.hidden = true; el.innerHTML = ""; S.said = null; return; }
   const r = room();
-  const blocked = p.kind === "preset" && !S.unlock && presetNeedsUnlock(r, PRESETS.find((x) => x.id === p.to), r.vol.v);
+  const loud = pendingIsLoud(r, p);
+  const blocked = loud && !S.unlock;
   el.hidden = false;
   el.innerHTML = `<div class="in" role="region" aria-label="Pending change">
     <div class="tag">${S.sending ? "Sending…" : "Preview · nothing sent yet"}</div>
     <div class="what num">${esc(p.what)}</div>
     ${p.note ? `<div class="banner warn">${esc(p.note)}</div>` : ""}
-    ${blocked ? `<div class="banner warn">Needs “Allow above ${MINUS}10 dB” first: ${loudReason(r)}.</div>` : ""}
+    ${blocked ? `<div class="banner warn">Needs “Allow above ${MINUS}10 dB” first: ${loudReason(r, p)}.</div>` : ""}
+    ${loud ? `<label class="check"><input type="checkbox" id="unlock-bar" ${S.unlock ? "checked" : ""} ${S.sending ? "disabled" : ""}>
+      <span>${UNLOCK_LABEL}</span></label><div id="unlock-bar-note" class="why">${S.unlock ? `${S.unlockLeft} s left. The same checkbox as in DAC volume.` : ""}</div>` : ""}
     <details id="frames" ${S.framesOpen ? "open" : ""}><summary>Frames to send</summary><pre>${esc(p.frames)}</pre></details>
     <div class="acts"><button data-act="cancel" ${S.sending ? "disabled" : ""}>Cancel</button>
       <button class="primary" data-act="send" ${S.sending || blocked ? "disabled" : ""}>${S.sending ? "Sending to " + esc(r.host) + "…" : "Send to " + esc(r.name)}</button></div>
   </div>`;
   if (S.said !== p.what) { S.said = p.what; say("Preview: " + p.what + ". Nothing sent yet. Send and Cancel are after the page."); }
+}
+function refreshBarUnlock() {
+  const n = $("#unlock-bar-note");
+  if (n && S.unlock) n.textContent = `${S.unlockLeft} s left. The same checkbox as in DAC volume.`;
 }
 
 // The bar is fixed, so keep room for it under the page, whatever its height.
@@ -593,14 +759,27 @@ function padForBar() {
 }
 if (window.ResizeObserver) new ResizeObserver(padForBar).observe($("#pending"));
 
-// Presets and power: the preview bar's Send. Volume never goes through here.
+// What a plan's Send depends on: volume, gain and power (the plan's default set).
+// Returns the first one the device no longer matches, as the 409 would.
+// Asleep, the level isn't compared: what a read returns then is unmeasured, and
+// waking resumes the stored level, which the page reads after waking (Q13).
+function changedElsewhere(r) {
+  if (r.vol.v !== null && !asleep(r) && r.dev !== r.vol.v) return `${r.name} reads ${db(r.dev)}, not the ${db(r.vol.v)} this change started from`;
+  if (r.gain.v !== null && r.devGain !== undefined && r.devGain !== r.gain.v) return `${r.name}'s gain reads ${r.devGain}, not ${r.gain.v}`;
+  if (r.power.v !== null && r.devPower !== undefined && r.devPower !== r.power.v && r.power.src === "read") return `${r.name} reads ${r.devPower}, not ${r.power.v}`;
+  return null;
+}
+
+// Gain, presets and power: the preview bar's Send. Volume never goes through here.
 function sendPending() {
   const r = room(), p = S.pending;
-  if (!writable(r)) { clearPending(); render(); return; }
-  const to = p.kind === "preset" ? PRESETS.find((x) => x.id === p.to) : null;
-  const loud = to !== null && presetNeedsUnlock(r, to, r.vol.v);
+  if (!writable(r)) {
+    S.toast = { room: r.id, kind: "bad", html: `<strong>Not sent.</strong> ${esc(stateLine(r))} Your change is still waiting below.` };
+    render(); say(plain(S.toast.html)); return;
+  }
+  const loud = pendingIsLoud(r, p);
   if (loud && !S.unlock) {
-    S.toast = { room: r.id, kind: "bad", html: `<strong>Not sent.</strong> ${esc(r.name)}: ${loudReason(r)}. Tick “Allow above ${MINUS}10 dB”, then send again.` };
+    S.toast = { room: r.id, kind: "bad", html: `<strong>Not sent.</strong> ${esc(r.name)}: ${loudReason(r, p)}. Tick “Allow above ${MINUS}10 dB”, then send again.` };
     render(); say(plain(S.toast.html)); return;
   }
   S.sending = true; render();
@@ -611,18 +790,46 @@ function sendPending() {
       S.toast = { room: r.id, kind: "bad", html: `<strong>Couldn't reach ${esc(r.host)}.</strong> Nothing was changed. Your change is still waiting below; try sending it again.` };
       render(`[data-act="send"]`); say(plain(S.toast.html)); return;
     }
-    S.pending = null; S.said = null;
-    if (loud && S.rooms.every((x) => x.ui.flight === null && x.ui.want === null)) relock();  // a volume change in progress keeps the checkbox
+    // The agent re-reads first. Anything the change depends on that moved means 409: nothing sent.
+    const moved = changedElsewhere(r);
+    if (moved) {
+      r.vol = { v: r.dev, src: "read", age: "just now" };
+      if (r.devGain !== undefined) r.gain = { v: r.devGain, src: "read", age: "just now" };
+      if (r.devPower !== undefined) r.power = { v: r.devPower, src: "read", age: "just now" };
+      clearPending();
+      if (loud && !anyVolumeOpen()) relock();
+      S.toast = { room: r.id, kind: "bad", html: `<strong>Not sent. Changed elsewhere:</strong> ${esc(moved)}. The values below are from that read. Check them, then choose the change again.` };
+      render(); say(plain(S.toast.html)); return;
+    }
+    clearPending();
+    if (loud && !anyVolumeOpen()) relock();  // a volume change in progress keeps the checkbox
     if (p.kind === "preset") {
+      const to = PRESETS.find((x) => x.id === p.to);
       r.preset = { v: p.to, src: "written", age: "just now" };
       if (to.pre !== null) r.preamp = { v: to.pre, src: "written", age: "just now" };
       S.toast = { room: r.id, kind: "info", html: `Applied “${esc(presetName(p.to))}” to ${esc(r.name)}.` +
         (p.from && p.from !== p.to ? ` <button class="link" data-act="undopreset" data-to="${p.from}">Undo (back to ${esc(presetName(p.from))})</button>` : "") };
+    } else if (p.kind === "gain") {
+      r.devGain = p.to;
+      r.gain = { v: p.to, src: "read", age: "just now" };
+      const back = p.from === null ? (p.to === "High" ? "Low" : "High") : p.from;
+      S.toast = { room: r.id, kind: "info", html: `${esc(r.name)} is on ${esc(p.to.toLowerCase())} gain, read back from the device. ` +
+        `<button class="link" data-act="undogain" data-to="${back}">Undo (preview: ${esc(back.toLowerCase())} gain)</button>` };
+    } else if (p.to === "sleep") {
+      r.devPower = "Asleep";
+      // What a read returns while asleep is unmeasured (plan step 2), so this is what was sent.
+      r.power = { v: "Asleep", src: "written", age: "just now" };
+      S.toast = { room: r.id, kind: "info", html: `${esc(r.name)} was sent to sleep. ` +
+        `<button class="link" data-act="undopower" data-to="wake">Undo (preview: wake)</button>` };
     } else {
-      const asleep = p.to === "sleep";
-      r.power = { v: asleep ? "Asleep" : "Awake", src: "written", age: "just now" };
-      S.toast = { room: r.id, kind: "info", html: `${esc(r.name)} is ${asleep ? "asleep" : "awake"}. ` +
-        `<button class="link" data-act="undopower" data-to="${asleep ? "wake" : "sleep"}">Undo (preview: ${asleep ? "wake" : "sleep"})</button>` };
+      r.devPower = "Awake";
+      r.power = { v: "Awake", src: "read", age: "just now" };
+      r.vol = { v: r.dev, src: "read", age: "just now" };   // Q13: read after waking
+      const undo = `<button class="link" data-act="undopower" data-to="sleep">Undo (preview: sleep)</button>`;
+      S.toast = r.vol.v > SAFE_MAX
+        ? { room: r.id, kind: "warn", loud: true, html: `<strong>${esc(r.name)} woke at ${esc(db(r.vol.v))}</strong>, above ${MINUS}10 dB. ` +
+            `<br><button class="primary" data-act="lower">Lower to ${MINUS}30 dB now</button> ${undo}` }
+        : { room: r.id, kind: "info", html: `${esc(r.name)} is awake at ${esc(db(r.vol.v))}, read after waking. ${undo}` };
     }
     render(); say(plain(S.toast.html));
   }, 800);
@@ -632,8 +839,19 @@ function readVol(r) {
   r.reading = true; render();
   setTimeout(() => {
     r.reading = false;
+    if (r.state === "busy") { render(); return; }
+    if (S.readFailNext) {
+      S.readFailNext = false;
+      r.state = "readfail";
+      r.readErr = "the settings read returned no records within 2 s (sample error)";
+      ["vol", "step", "gain", "power"].forEach((k) => { r[k] = unknown("read failed"); });
+      render(); say(`Read failed on ${r.name}. Values unknown.`); return;
+    }
+    r.state = "ok";
     r.vol = { v: r.dev, src: "read", age: "just now" };
     r.step = { v: 0.5, src: "read" };
+    if (r.devGain !== undefined) r.gain = { v: r.devGain, src: "read", age: "just now" };
+    if (r.devPower !== undefined && r.devPower !== "Asleep") r.power = { v: r.devPower, src: "read", age: "just now" };
     render();
   }, 900);
 }
@@ -669,6 +887,21 @@ function leaveRoom(r) {
   S.view = "list"; S.room = null; clearPending(); S.toast = null;
 }
 
+// Prototype control: the CLI on the office host takes the device lock for a while.
+function cliTakesLock() {
+  const r = S.rooms.find((x) => x.id === "office");
+  if (r.state !== "ok") return;
+  r.state = "busy"; r.holder = "the toppingctl CLI";
+  if (S.pending && S.room === "office" && !S.sending) clearPending();
+  say(`Office: DAC busy, in use by the toppingctl CLI on office.`);
+  setTimeout(() => {
+    if (r.state !== "busy") return;
+    r.state = "ok"; r.vol = { v: r.dev, src: "read", age: "just now" };
+    say("Office's DAC is free again.");
+    render();
+  }, BUSY_MS);
+}
+
 function onAct(act, el) {
   const r = room();
   switch (act) {
@@ -681,6 +914,9 @@ function onAct(act, el) {
     case "typed": return typedSet(r);
     case "cancelvol": cancelVol(r); return;
     case "undo": return undoVol(r);
+    case "lower": return lowerNow(r);
+    case "gain":
+    case "undogain": stageGain(el.dataset.to); break;
     case "power":
     case "undopower": stagePower(el.dataset.to === "sleep"); break;
     case "undopreset": stagePreset(el.dataset.to); break;
@@ -690,6 +926,11 @@ function onAct(act, el) {
       S.rooms.find((x) => x.id === "office").dev -= 6;
       say("Office was turned down 6 dB at the front panel. The page learns it only from a read or a write.");
       break;
+    case "remoteloud":
+      S.rooms.find((x) => x.id === "office").dev = -6;
+      say("Office was turned up to −6 dB with the remote. The page learns it only from a read or a write.");
+      break;
+    case "cli": cliTakesLock(); break;
     case "reset": reset(); break;
   }
   render();
@@ -698,7 +939,10 @@ function onAct(act, el) {
 function protoControls() {
   return `<div class="proto">
     <label class="check"><input type="checkbox" id="failnext" ${S.failNext ? "checked" : ""}><span>Make the next write fail (sample)</span></label>
+    <label class="check"><input type="checkbox" id="readfailnext" ${S.readFailNext ? "checked" : ""}><span>Make the next read fail (sample)</span></label>
     <div class="row" style="flex-wrap:wrap"><button class="link" data-act="frontpanel">Turn Office down 6 dB at the front panel (sample)</button>
+    <button class="link" data-act="remoteloud">Turn Office up to ${MINUS}6 dB with the remote (sample)</button>
+    <button class="link" data-act="cli">The CLI takes Office's DAC for 8 s (sample)</button>
     <button class="link" data-act="reset">Reset sample data</button></div>
     <div>Prototype controls, not part of the page. Nothing here reaches a DAC.</div></div>`;
 }
@@ -724,14 +968,17 @@ document.addEventListener("click", (e) => {
 
 document.addEventListener("change", (e) => {
   const t = e.target;
-  if (t.id === "unlock") {
+  if (t.id === "unlock" || t.id === "unlock-bar") {
     const r = room();
     if (r && t.checked) r.ui.err = "";
     setUnlock(t.checked);
     refreshVolume();
     renderPending();
+    if (t.id === "unlock-bar" && $("#unlock-bar")) $("#unlock-bar").focus();
   } else if (t.id === "failnext") {
     S.failNext = t.checked;
+  } else if (t.id === "readfailnext") {
+    S.readFailNext = t.checked;
   } else if (t.name === "preset") {
     stagePreset(t.value);
     render(`input[name="preset"]:checked`);
