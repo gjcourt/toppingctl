@@ -176,30 +176,39 @@ class Auth:
         self._checked_at = None
         self._seen = {}  # nonce -> its timestamp
         self.recheck_secs = 1.0  # how often to ask timedatectl before first sync
+        self._watching = False
         self._mu = threading.Lock()
 
     def _synced_floor(self):
         """The floor, taken the first time the clock reports sync -- not at
-        process start, when fake-hwclock may have left it far behind."""
-        if self.floor is None:
+        process start, when fake-hwclock may have left it far behind. It is
+        the next whole second, so a request accepted by a process that
+        restarted within the same second can't be replayed. Once watch() is
+        running, only the watcher takes it. timedatectl runs outside _mu."""
+        if self.floor is not None or self._watching:
+            return self.floor
+        with self._mu:
             t = time.monotonic()
             if self._checked_at is not None and t - self._checked_at < self.recheck_secs:
                 return None
             self._checked_at = t
-            if self.ntp_synced():
-                self.floor = int(self.now())
+        return self._take_floor()
+
+    def _take_floor(self):
+        if self.ntp_synced():
+            with self._mu:
+                if self.floor is None:
+                    self.floor = int(self.now()) + 1
         return self.floor
 
     def watch(self):
         """Take the floor the moment the clock syncs, from a background
         thread, rather than inside the first request's check: a request
         signed a second before that check would otherwise land under it."""
+        self._watching = True
 
         def run():
-            while True:
-                with self._mu:
-                    if self._synced_floor() is not None:
-                        return
+            while self._take_floor() is None:
                 time.sleep(self.recheck_secs)
 
         threading.Thread(target=run, name="ntp-floor", daemon=True).start()
@@ -212,8 +221,8 @@ class Auth:
         # Format first: compare_digest raises on a non-ASCII str.
         if not (TIMESTAMP.fullmatch(ts) and NONCE.fullmatch(nonce) and SIGNATURE.fullmatch(sig)):
             raise AuthError(401, "missing or malformed signature headers")
+        floor = self._synced_floor()
         with self._mu:
-            floor = self._synced_floor()
             if floor is None:
                 raise AuthError(503, "the clock is not NTP-synchronised yet; nothing is accepted")
             want = sign(self.key, request_message(method, path, ts, nonce, body))
@@ -494,8 +503,6 @@ class Agent:
         return {"room": self.room, "status": status, "dac": dac, "fields": fields, **extra}
 
     def _read(self):
-        # Whatever this read finds, the old one no longer describes the room.
-        self._cache = None
         dac = identify(self.configured_device)
         if dac["status"] != "found":
             reasons = {
@@ -504,14 +511,21 @@ class Agent:
                 "several": "several DACs attached; this agent drives one",
                 "different": f"a different DAC than configured ({self.configured_device})",
             }
+            # The cached read no longer describes the room; nor below.
+            self._cache = None
             return 200, self._base(dac, dac["status"], reason=reasons[dac["status"]])
         key = dac["key"]
         path = read_path(key)
         if path is None:
+            self._cache = None
             return 200, self._base(dac, "not_read", reason=NO_READ_REASON)
         try:
             at, fields, settings, volumes = self._device_read(key, path)
         except Unavailable as e:
+            # Busy says nothing about the room, so the last read stays
+            # servable, with its age; a failed read replaces it.
+            if e.status != "busy":
+                self._cache = None
             body = self._base(dac, e.status, reason=e.message, error=e.message)
             if e.holder:
                 body["holder"] = e.holder

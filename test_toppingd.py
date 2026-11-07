@@ -152,6 +152,9 @@ class AgentTestCase(unittest.TestCase):
             self.addCleanup(p.stop)
         self.auth = toppingd.Auth(KEY, now=lambda: self.clock[0], ntp_synced=lambda: self.synced[0])
         self.auth.recheck_secs = 0
+        if self.synced[0]:
+            # Synced an hour ago, so the floor (NtpFloorTest) stays out of the way.
+            self.auth.floor = int(self.clock[0]) - 3600
         self.agent = toppingd.Agent("office", self.configured, self.state_dir)
         self.server = toppingd.make_server(("127.0.0.1", 0), self.agent, self.auth)
         self.server.RequestHandlerClass.log_message = lambda *a: None
@@ -196,13 +199,11 @@ class AgentTestCase(unittest.TestCase):
 
 class AuthTest(AgentTestCase):
     """The plan's "Agent authentication": signatures, skew, replay and
-    signed responses that cover the request's nonce. The clock synced an hour
-    ago here, so the floor (NtpFloorTest) stays out of the way."""
+    signed responses that cover the request's nonce."""
 
     def setUp(self):
         super().setUp()
         self.start()
-        self.auth.floor = int(self.clock[0]) - 3600
 
     def test_signed_request_gets_a_signed_response(self):
         status, obj, headers, nonce, raw = self.call("/v1/room")
@@ -292,19 +293,22 @@ class NtpFloorTest(AgentTestCase):
         stale = time.time() - 86400  # fake-hwclock's idea of now
         self.clock[0], self.synced[0] = stale, False
         self.start()
-        status, obj, headers, *_ = self.call("/v1/room")
+        # A request signed against the stale clock: refused before sync, and
+        # captured on the wire for a replay.
+        captured = uuid.uuid4().hex
+        status, obj, headers, *_ = self.call("/v1/room", nonce=captured)
         self.assertEqual((status, obj["error"]), (503, "clock_unsynced"))
         self.assertIn("NTP", obj["reason"])
         self.assertIsNone(headers.get("X-Toppingd-Signature"))
-        # A request signed against the stale clock, captured before sync.
-        captured = uuid.uuid4().hex
         self.clock[0], self.synced[0] = time.time(), True
+        self.assertEqual(self.auth._synced_floor(), int(self.clock[0]) + 1)
+        self.clock[0] += 2
         self.assertEqual(self.call("/v1/room")[0], 200)
-        self.assertEqual(self.auth.floor, int(self.clock[0]))
-        # The stale request is refused by skew, and one signed just before
+        # The replay is refused by skew, and a request signed just before
         # the floor by the floor, even within the 30 s window.
         status, obj, *_ = self.call("/v1/room", ts=stale, nonce=captured)
         self.assertEqual(status, 401)
+        self.assertIn("off this host's clock", obj["reason"])
         status, obj, *_ = self.call("/v1/room", ts=self.auth.floor - 5)
         self.assertEqual((status, obj["reason"]), (401, toppingd_floor_reason()))
 
@@ -320,9 +324,39 @@ class NtpFloorTest(AgentTestCase):
             if self.auth.floor is not None:
                 break
             time.sleep(0.01)
-        self.assertEqual(self.auth.floor, int(self.clock[0]))
+        self.assertEqual(self.auth.floor, int(self.clock[0]) + 1)
         self.clock[0] += 5
         self.assertEqual(self.call("/v1/room", ts=self.clock[0] - 1)[0], 200)
+
+    def test_requests_before_sync_dont_take_the_floor_once_watched(self):
+        self.synced[0] = False
+        self.start()
+        self.auth.recheck_secs = 0.05
+        self.auth.watch()
+        self.assertEqual(self.call("/v1/room")[0], 503)
+        self.synced[0] = True
+        for _ in range(200):
+            if self.auth.floor is not None:
+                break
+            time.sleep(0.01)
+        floor = self.auth.floor
+        self.clock[0] += 3
+        self.assertEqual(self.call("/v1/room", ts=self.clock[0] - 1)[0], 200)
+        self.assertEqual(self.auth.floor, floor)
+
+    def test_restart_in_the_same_second_does_not_reopen_the_window(self):
+        self.start()
+        self.clock[0] = float(int(self.clock[0])) + 0.2
+        ts = self.clock[0] + 2
+        self.clock[0] += 2
+        nonce = uuid.uuid4().hex
+        self.assertEqual(self.call("/v1/room", nonce=nonce, ts=ts)[0], 200)
+        self.clock[0] += 0.5  # restart within the same second
+        self.server.RequestHandlerClass.auth = toppingd.Auth(
+            KEY, now=lambda: self.clock[0], ntp_synced=lambda: True
+        )
+        status, obj, *_ = self.call("/v1/room", nonce=nonce, ts=ts)
+        self.assertEqual((status, obj["reason"]), (401, toppingd_floor_reason()))
 
     def test_restart_does_not_reopen_the_replay_window(self):
         self.start()
@@ -423,6 +457,17 @@ class Dx5StateTest(AgentTestCase):
         st = self.get("/v1/state")[1]
         self.assertEqual(st["status"], "read_failed")
         self.assertFalse(st.get("cached"))
+
+    def test_busy_keeps_the_cached_read(self):
+        self.start()
+        self.get("/v1/state?fresh=1")
+        self.agent._hid.acquire()
+        try:
+            self.assertEqual(self.get("/v1/state?fresh=1")[0], 423)
+        finally:
+            self.agent._hid.release()
+        st = self.get("/v1/state")[1]
+        self.assertEqual((st["status"], st["cached"]), ("read", True))
 
     def test_cli_default_source_is_not_a_preset(self):
         with open(os.path.join(self.state_dir, "state.json"), "w") as fh:
