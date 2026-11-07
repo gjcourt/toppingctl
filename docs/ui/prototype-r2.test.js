@@ -52,7 +52,7 @@ function stubDom() {
     activeElement: null,
     createElement: () => ({ innerHTML: "", get textContent() { return this.innerHTML.replace(/<[^>]*>/g, ""); } }),
     addEventListener: (type, fn) => { (listeners[type] = listeners[type] || []).push(fn); },
-    dispatch: (type, target) => { for (const fn of listeners[type] || []) fn({ target, preventDefault() {} }); },
+    dispatch: (type, target, extra = {}) => { for (const fn of listeners[type] || []) fn({ target, preventDefault() {}, ...extra }); },
   };
 }
 
@@ -176,7 +176,7 @@ test("Cancel during a write says the write may still land", () => {
 });
 
 test("with the step unread, the level is not changed and says what to do", () => {
-  const h = open("living");
+  const h = open("office");
   h.run(`room().vol = { v: -30, src: "read", age: "x" }; room().step = { v: null, src: "unknown" };`);
   h.run("refreshVolume()");
   h.drag(-20);
@@ -194,12 +194,15 @@ test("a changed device refuses the change and says what to do next", () => {
   h.t.advance(1000);
   const msg = h.room().ui.msg;
   assert.equal(msg.kind, "refused");
-  assert.match(msg.text, /Read Office again, then set the level again/);
+  assert.match(msg.text, /set the level again from there/);
+  assert.doesNotMatch(msg.text, /Read Office again/, "the refusal already shows the fresh read");
+  assert.equal(h.room().vol.v, -20);
 });
 
 test("power unknown: Sleep and Wake are both enabled and the preview says so", () => {
-  const h = open("living");
-  const block = h.run("powerBlock(room(), true)");
+  const h = open("office");
+  h.run(`room().power = { v: null, src: "unknown" };`);
+  const block = h.run("powerBlock(room())");
   assert.doesNotMatch(block, /data-to="sleep" disabled/);
   assert.doesNotMatch(block, /data-to="wake" disabled/);
   h.run("stagePower(true)");
@@ -208,7 +211,7 @@ test("power unknown: Sleep and Wake are both enabled and the preview says so", (
 
 test("power known: only the action that changes state is enabled", () => {
   const h = open("office");
-  const block = h.run("powerBlock(room(), true)");
+  const block = h.run("powerBlock(room())");
   assert.match(block, /data-to="wake" disabled/);
   assert.doesNotMatch(block, /data-to="sleep" disabled/);
 });
@@ -235,16 +238,241 @@ test("a preset that raises the preamp is sent without the unlock when the level 
 });
 
 test("a level that was never read is shown as unknown, not as -99", () => {
-  const h = open("living");
+  const h = open("office");
   h.run(`room().vol = { v: null, src: "unknown" };`);
-  assert.doesNotMatch(h.run("volumeCard(room(), true)"), /-99|value="/);
-  assert.doesNotMatch(h.run("volumeCard(room(), false)"), /-99|value="/);
-  h.run(`room().vol = { v: -30, src: "read", age: "x" }; room().step = { v: null, src: "unknown" };`);
-  const stepper = h.run("volumeCard(room(), true)");
+  assert.doesNotMatch(h.run("volumeCard(room())"), /-99|value="/);
+  h.run(`room().state = "down";`);
+  assert.doesNotMatch(h.run("volumeCard(room())"), /-99|value="/);
+  h.run(`room().state = "ok"; room().vol = { v: -30, src: "read", age: "x" }; room().step = { v: null, src: "unknown" };`);
+  const stepper = h.run("volumeCard(room())");
   assert.match(stepper, /quieter, step unknown/);
   assert.match(stepper, /louder, step unknown/);
 });
 
 test("the volume status is not a polite live region", () => {
   assert.doesNotMatch(html, /id="vol-status"[^>]*aria-live/);
+});
+
+// --- TOPPINGCTL-12: gain, room states, "DAC volume", wake ---------------------
+
+const app = (h) => h.doc.els.get("#app").innerHTML;
+const bar = (h) => h.doc.els.get("#pending").innerHTML;
+const act = (h, a, data = {}) => h.run(`onAct(${JSON.stringify(a)}, { dataset: ${JSON.stringify(data)} })`);
+
+test("the room list shows every room state from the plan, in the plan's words", () => {
+  const h = open();
+  act(h, "back");
+  const list = app(h);
+  assert.match(list, /not read: no confirmed read path for this model/);
+  assert.match(list, /DAC busy · in use by the toppingctl CLI on den/);
+  assert.match(list, /Unreachable · studio · last seen 14 min ago/);
+  assert.match(list, /No DAC found on snap-test/);
+  assert.match(list, /Unrecognised DAC: D50s \(sample product string\)\. Read-only/);
+  assert.match(list, /Different DAC than expected: Topping D90 III Discrete/);
+  assert.match(list, /DAC volume/);
+});
+
+test("an identified room that isn't read shows Unknown with the reason, and no controls", () => {
+  const h = open("living");
+  const page = app(h);
+  assert.match(page, /Unknown · not read: no confirmed read path/);
+  assert.doesNotMatch(page, /data-act="(step|gain|power|read)"/);
+  assert.doesNotMatch(page, /name="preset"/);
+});
+
+test("the room page labels the figure DAC volume and says it isn't the level at the ear", () => {
+  const h = open();
+  assert.match(app(h), /<h2>DAC volume<\/h2>/);
+  assert.match(app(h), /isn't the level at your ears/);
+});
+
+test("DAC busy: a write the agent checks while busy is refused, nothing is sent, and the controls come back when free", () => {
+  const h = open();
+  h.drag(-36);
+  h.t.advance(300);                         // -36 is in flight
+  act(h, "cli");                            // the CLI takes the lock before the agent's check
+  assert.match(app(h), /DAC busy/);
+  assert.doesNotMatch(app(h), /data-act="step"/);
+  h.t.advance(1000);
+  assert.equal(h.room().dev, -32);
+  assert.equal(h.room().ui.msg.kind, "refused");
+  assert.match(h.room().ui.msg.text, /in use by the toppingctl CLI/);
+  h.t.advance(8000);
+  assert.equal(h.room().state, "ok");
+  assert.match(app(h), /data-act="step"/);
+});
+
+test("high gain needs the unlock, low gain doesn't, and a gain send relocks", () => {
+  const h = open();
+  act(h, "gain", { to: "High" });
+  assert.match(bar(h), /data-act="send" disabled/);
+  assert.match(bar(h), /high gain counts as loud/);
+  assert.match(bar(h), /id="unlock-bar"/);
+  h.doc.dispatch("change", { id: "unlock-bar", checked: true });
+  assert.doesNotMatch(bar(h), /data-act="send" disabled/);
+  h.run("sendPending()");
+  h.t.advance(800);
+  assert.equal(h.room().gain.v, "High");
+  assert.equal(h.room().gain.src, "read");
+  assert.equal(h.run("S.unlock"), false);
+  act(h, "undogain", { to: "Low" });
+  assert.doesNotMatch(bar(h), /data-act="send" disabled/);
+  assert.doesNotMatch(bar(h), /unlock-bar/);
+});
+
+test("a gain change is refused as changed elsewhere when the volume moved, and nothing is sent", () => {
+  const h = open();
+  act(h, "gain", { to: "High" });
+  h.unlock(true);
+  act(h, "frontpanel");                     // -32 -> -38 behind the page's back
+  h.run("sendPending()");
+  h.t.advance(800);
+  assert.equal(h.room().devGain, "Low");
+  assert.equal(h.room().vol.v, -38);
+  assert.match(h.run("S.toast.html"), /Changed elsewhere/);
+  assert.equal(h.run("S.pending"), null);
+});
+
+test("asleep: volume and gain are disabled, wake is previewed and reads the level", () => {
+  const h = open();
+  act(h, "power", { to: "sleep" });
+  assert.match(bar(h), /Preview · nothing sent yet/);
+  h.run("sendPending()");
+  h.t.advance(800);
+  assert.equal(h.room().power.v, "Asleep");
+  assert.equal(h.room().power.src, "written", "an asleep read is unmeasured, so it's shown as written");
+  assert.doesNotMatch(app(h), /data-act="(step|gain)"/);
+  assert.match(app(h), /Wake Office to change this/);
+  assert.match(app(h), /Undo \(preview: wake\)/);
+  act(h, "remoteloud");                     // stored level is now -6
+  act(h, "undopower", { to: "wake" });
+  h.run("sendPending()");
+  h.t.advance(800);
+  assert.equal(h.room().power.v, "Awake");
+  assert.equal(h.room().vol.v, -6);
+  assert.match(h.run("S.toast.html"), /woke at −6\.0 dB/);
+  assert.match(h.run("S.toast.html"), /Lower to −30 dB/);
+});
+
+test("Lower to -30 dB sends at once, with no unlock and no quiet time", () => {
+  const h = open();
+  h.run(`room().dev = -6; room().vol = { v: -6, src: "read", age: "x" }; refreshVolume();`);
+  assert.match(h.doc.els.get("#vol-loud").innerHTML, /Lower to −30 dB/);
+  act(h, "lower");
+  assert.equal(h.room().ui.flight, -30, "no 300 ms wait");
+  h.t.advance(1700);
+  assert.equal(h.room().dev, -30);
+});
+
+test("a failed read shows values as unknown and disables changes until a read works", () => {
+  const h = open();
+  h.doc.dispatch("change", { id: "readfailnext", checked: true });
+  act(h, "read");
+  h.t.advance(900);
+  assert.equal(h.room().state, "readfail");
+  assert.equal(h.room().vol.v, null);
+  assert.match(app(h), /Read failed/);
+  assert.doesNotMatch(app(h), /data-act="(step|gain|power)"/);
+  act(h, "read");
+  h.t.advance(900);
+  assert.equal(h.room().state, "ok");
+  assert.equal(h.room().vol.v, -32);
+});
+
+test("r2 has no scene recall", () => {
+  assert.doesNotMatch(script, /recall|scene|\bC[12]\b|71 1[12]/i);
+});
+
+test("a gain change is refused as changed elsewhere when the gain moved", () => {
+  const h = open();
+  act(h, "gain", { to: "High" });
+  h.unlock(true);
+  h.run(`room().devGain = "High"`);         // switched on the front panel
+  h.run("sendPending()");
+  h.t.advance(800);
+  assert.match(h.run("S.toast.html"), /Changed elsewhere:.*gain reads High, not Low/);
+  assert.equal(h.room().gain.v, "High");
+  assert.equal(h.run("S.unlock"), false);
+});
+
+test("a previewed send that finds the DAC busy is refused and sends nothing", () => {
+  const h = open();
+  act(h, "gain", { to: "High" });
+  h.unlock(true);
+  h.run("sendPending()");
+  h.t.advance(100);
+  act(h, "cli");                            // the lock is taken while the send is under way
+  h.t.advance(800);
+  assert.equal(h.room().devGain, "Low");
+  assert.match(h.run("S.toast.html"), /Not sent\..*DAC busy/);
+  assert.equal(h.run("S.unlock"), false);
+});
+
+test("the DAC going busy drops a preview, says so, and ends the unlock", () => {
+  const h = open();
+  act(h, "gain", { to: "High" });
+  h.unlock(true);
+  act(h, "cli");
+  assert.equal(h.run("S.pending"), null);
+  assert.match(h.run("S.toast.html"), /Preview dropped/);
+  assert.equal(h.run("S.unlock"), false);
+});
+
+test("Cancel and Escape on a preview end the unlock", () => {
+  const h = open();
+  act(h, "gain", { to: "High" });
+  h.unlock(true);
+  act(h, "cancel");
+  assert.equal(h.run("S.unlock"), false);
+  act(h, "gain", { to: "High" });
+  h.unlock(true);
+  h.doc.dispatch("keydown", { id: "" }, { key: "Escape" });
+  assert.equal(h.run("S.pending"), null);
+  assert.equal(h.run("S.unlock"), false);
+});
+
+test("Cancel on a preview keeps the unlock while a volume change is open", () => {
+  const h = open();
+  h.unlock(true);
+  h.drag(-5);
+  h.t.advance(300);                         // -5 in flight
+  act(h, "gain", { to: "High" });
+  act(h, "cancel");
+  assert.equal(h.run("S.unlock"), true);
+});
+
+test("Read is disabled while a change waits, and a write isn't sent to a room whose read failed", () => {
+  const h = open();
+  h.drag(-36);
+  assert.equal(h.doc.els.get("#read").disabled, true);
+  h.t.advance(300);                         // in flight
+  h.run(`room().state = "readfail"; room().readErr = "sample";`);
+  h.t.advance(2000);
+  assert.equal(h.room().dev, -32);
+  assert.equal(h.room().ui.msg.kind, "refused");
+});
+
+test("asleep: values read before sleep are labelled as such", () => {
+  const h = open();
+  act(h, "power", { to: "sleep" });
+  h.run("sendPending()");
+  h.t.advance(800);
+  assert.match(app(h), /Read from device · 12 s ago · before it slept/);
+  act(h, "back");
+  assert.match(app(h), /before it slept/);
+});
+
+test("the not-read room's list card shows the product string", () => {
+  const h = open();
+  act(h, "back");
+  assert.match(app(h), /D90 III Discrete \(sample product string\) · living-room/);
+});
+
+test("the output shows where it came from, like every other value", () => {
+  const h = open();
+  act(h, "back");
+  assert.match(app(h), /Headphones, balanced \(read 12 s ago\)/);
+  assert.match(app(h), /Line out, single-ended \(read 14 min ago, last known\)/);
+  act(h, "open", { id: "office" });
+  assert.match(app(h), /output: Headphones, balanced \(read 12 s ago\)/);
 });
