@@ -87,6 +87,7 @@ OPEN_ATTEMPTS = 4
 OPEN_RETRY_SECS = 0.4
 
 SKEW_SECS = 30
+SIGNATURE = re.compile(r"[0-9a-f]{64}")
 NONCE = re.compile(r"[A-Za-z0-9_-]{16,128}")
 TIMESTAMP = re.compile(r"[0-9]{1,12}")
 MIN_KEY_BYTES = 32
@@ -133,6 +134,8 @@ def verify_response(key, sent_nonce, status, headers, body):
     nonce = headers.get("X-Toppingd-Nonce", "")
     ts = headers.get("X-Toppingd-Timestamp", "")
     sig = headers.get("X-Toppingd-Signature", "")
+    if not (SIGNATURE.fullmatch(sig) and TIMESTAMP.fullmatch(ts) and NONCE.fullmatch(nonce)):
+        return False
     if not hmac.compare_digest(nonce, sent_nonce):
         return False
     want = sign(key, response_message(sent_nonce, status, ts, body))
@@ -187,12 +190,27 @@ class Auth:
                 self.floor = int(self.now())
         return self.floor
 
+    def watch(self):
+        """Take the floor the moment the clock syncs, from a background
+        thread, rather than inside the first request's check: a request
+        signed a second before that check would otherwise land under it."""
+
+        def run():
+            while True:
+                with self._mu:
+                    if self._synced_floor() is not None:
+                        return
+                time.sleep(self.recheck_secs)
+
+        threading.Thread(target=run, name="ntp-floor", daemon=True).start()
+
     def check(self, method, path, headers, body):
         """Return the request's nonce, or raise AuthError."""
         ts = headers.get("X-Toppingd-Timestamp") or ""
         nonce = headers.get("X-Toppingd-Nonce") or ""
         sig = headers.get("X-Toppingd-Signature") or ""
-        if not (TIMESTAMP.fullmatch(ts) and NONCE.fullmatch(nonce) and sig):
+        # Format first: compare_digest raises on a non-ASCII str.
+        if not (TIMESTAMP.fullmatch(ts) and NONCE.fullmatch(nonce) and SIGNATURE.fullmatch(sig)):
             raise AuthError(401, "missing or malformed signature headers")
         with self._mu:
             floor = self._synced_floor()
@@ -242,6 +260,10 @@ class ReadOnlyHandle:
                 f"refusing opcode {opcode:02x} to {reg_sub[0]:02x} {reg_sub[1]:02x}: "
                 "this agent is read-only"
             )
+        if any(f[7:11]):
+            # On the DX1 II an unsafe readNack writes its data field; the
+            # readers here always send 0.
+            raise Refused(f"refusing a readNack with a non-zero data field: {data.hex(' ')}")
         if reg_sub not in CONFIRMED_READS.get(self.dev_key, ()):
             raise Refused(
                 f"refusing a readNack to {reg_sub[0]:02x} {reg_sub[1]:02x} on "
@@ -303,6 +325,9 @@ def identify(configured="auto"):
         out.update(status="several", keys=keys)
         return out
     (key,) = keys
+    if len({e["serial"] for e in entries if e["key"] == key}) > 1:
+        out.update(status="several", keys=keys)
+        return out
     spec = DEVICES[key]
     product = next(e["product"] for e in entries if e["key"] == key)
     out.update(
@@ -310,13 +335,13 @@ def identify(configured="auto"):
         name=spec["name"],
         product=product,
         model_status=spec["status"],
-        read_path=read_path(key),
     )
     if configured != "auto" and configured != key:
         out["status"] = "different"
         out["expected"] = configured
     else:
         out["status"] = "found"
+        out["read_path"] = read_path(key)
     return out
 
 
@@ -337,7 +362,8 @@ def read_written(state_dir):
 
 
 def _written(st, at, key):
-    if key not in st:
+    # load_state's fallback source, which vol and gain save as-is: not a preset.
+    if key not in st or (key == "source" and st[key] == "defaults (no cache yet)"):
         return _unknown("never written by toppingctl on this host")
     return {"value": st[key], "source": "written", "at": _iso(at), "label": "last written"}
 
@@ -468,6 +494,8 @@ class Agent:
         return {"room": self.room, "status": status, "dac": dac, "fields": fields, **extra}
 
     def _read(self):
+        # Whatever this read finds, the old one no longer describes the room.
+        self._cache = None
         dac = identify(self.configured_device)
         if dac["status"] != "found":
             reasons = {
@@ -497,12 +525,12 @@ class Agent:
         return 200, {**body, "cached": False, "age_s": 0.0}
 
     def _device_read(self, key, path):
+        deadline = time.monotonic() + AGENT_LOCK_WAIT
         if not self._hid.acquire(timeout=AGENT_LOCK_WAIT):
-            raise Unavailable(
-                "busy", "busy with another request to toppingd", http=423, holder=PROG
-            )
+            holder = f"{PROG} (pid {os.getpid()})"
+            raise Unavailable("busy", toppingctl.busy_message(holder), http=423, holder=holder)
         try:
-            with self._device_lock():
+            with self._device_lock(max(0.0, deadline - time.monotonic())):
                 h = self._open(key)
                 try:
                     at = time.time()
@@ -523,11 +551,11 @@ class Agent:
             self._hid.release()
 
     @contextlib.contextmanager
-    def _device_lock(self):
+    def _device_lock(self, wait):
         """The shared device lock, once per operation. A read may run without
         it when the lock file can't be opened, as the CLI's reads do."""
         try:
-            toppingctl.acquire_device_lock(AGENT_LOCK_WAIT, prog=PROG)
+            toppingctl.acquire_device_lock(wait, prog=PROG)
             held = True
         except DeviceBusy as e:
             raise Unavailable(
@@ -570,6 +598,8 @@ def log(msg):
 class Handler(http.server.BaseHTTPRequestHandler):
     server_version = f"{PROG}/{VERSION}"
     sys_version = ""
+    # An idle or slow client can't hold a thread for ever.
+    timeout = 10
     # Set by make_server.
     agent = None
     auth = None
@@ -681,10 +711,10 @@ def load_config(path):
             "dry-run (live arrives with volume writes, plan step 4)"
         )
     device = cfg.get("device", "auto")
-    if device != "auto" and device not in DEVICES:
+    if not isinstance(device, str) or (device != "auto" and device not in DEVICES):
         raise ConfigError(f"unknown device {device!r}; auto or one of {', '.join(DEVICES)}")
     host, _, port = str(cfg.get("listen", "0.0.0.0:8740")).rpartition(":")
-    if not host or not port.isdigit():
+    if not host or not port.isdigit() or not 0 < int(port) < 65536:
         raise ConfigError(f"listen must be host:port, not {cfg.get('listen')!r}")
     if "key_file" not in cfg:
         raise ConfigError(f"{path} needs key_file")
@@ -707,7 +737,12 @@ def main():
     except ConfigError as e:
         sys.exit(f"{PROG}: {e}")
     agent = Agent(cfg["room"], cfg["device"], cfg["state_dir"], cfg["mode"])
-    server = make_server(cfg["listen"], agent, Auth(cfg["key"]))
+    auth = Auth(cfg["key"])
+    auth.watch()
+    try:
+        server = make_server(cfg["listen"], agent, auth)
+    except OSError as e:
+        sys.exit(f"{PROG}: cannot listen on {cfg['listen'][0]}:{cfg['listen'][1]}: {e.strerror}")
     host, port = cfg["listen"]
     log(f"{VERSION} serving room {cfg['room']} on {host}:{port}, mode {cfg['mode']}")
     try:

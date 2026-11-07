@@ -14,6 +14,7 @@ import functools
 import http.client
 import json
 import os
+import shutil
 import sys
 import tempfile
 import threading
@@ -124,6 +125,7 @@ class AgentTestCase(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.lockdir = os.path.join(self.tmp, "lock")
         os.mkdir(self.lockdir, 0o700)
         self.state_dir = os.path.join(self.tmp, "state")
@@ -150,8 +152,8 @@ class AgentTestCase(unittest.TestCase):
             self.addCleanup(p.stop)
         self.auth = toppingd.Auth(KEY, now=lambda: self.clock[0], ntp_synced=lambda: self.synced[0])
         self.auth.recheck_secs = 0
-        agent = toppingd.Agent("office", self.configured, self.state_dir)
-        self.server = toppingd.make_server(("127.0.0.1", 0), agent, self.auth)
+        self.agent = toppingd.Agent("office", self.configured, self.state_dir)
+        self.server = toppingd.make_server(("127.0.0.1", 0), self.agent, self.auth)
         self.server.RequestHandlerClass.log_message = lambda *a: None
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
@@ -236,6 +238,23 @@ class AuthTest(AgentTestCase):
                 status, obj, *_ = self.call(path, method=method, headers=hdrs)
                 self.assertEqual((status, obj["reason"]), (401, "bad signature"))
 
+    def test_signature_covers_the_body(self):
+        nonce, ts = uuid.uuid4().hex, str(int(self.clock[0]))
+        sig = toppingd.sign(KEY, toppingd.request_message("POST", "/v1/room", ts, nonce, b"a"))
+        hdrs = {"X-Toppingd-Timestamp": ts, "X-Toppingd-Nonce": nonce, "X-Toppingd-Signature": sig}
+        status, obj, *_ = self.call("/v1/room", method="POST", body=b"b", headers=hdrs)
+        self.assertEqual((status, obj["reason"]), (401, "bad signature"))
+
+    def test_non_ascii_signature_is_a_401_not_a_crash(self):
+        hdrs = {
+            "X-Toppingd-Timestamp": str(int(self.clock[0])),
+            "X-Toppingd-Nonce": uuid.uuid4().hex,
+            "X-Toppingd-Signature": "\xff" * 64,
+        }
+        status, obj, *_ = self.call("/v1/room", headers=hdrs)
+        self.assertEqual(status, 401)
+        self.assertFalse(toppingd.verify_response(KEY, hdrs["X-Toppingd-Nonce"], 200, hdrs, b"{}"))
+
     def test_missing_headers(self):
         status, obj, *_ = self.call("/v1/room", headers={})
         self.assertEqual(status, 401)
@@ -288,6 +307,22 @@ class NtpFloorTest(AgentTestCase):
         self.assertEqual(status, 401)
         status, obj, *_ = self.call("/v1/room", ts=self.auth.floor - 5)
         self.assertEqual((status, obj["reason"]), (401, toppingd_floor_reason()))
+
+    def test_floor_is_taken_at_sync_not_at_the_first_request(self):
+        # A client clock a second behind must not be refused just because
+        # its request was the one that noticed the sync.
+        self.synced[0] = False
+        self.start()
+        self.synced[0] = True
+        self.auth.recheck_secs = 0.01
+        self.auth.watch()
+        for _ in range(200):
+            if self.auth.floor is not None:
+                break
+            time.sleep(0.01)
+        self.assertEqual(self.auth.floor, int(self.clock[0]))
+        self.clock[0] += 5
+        self.assertEqual(self.call("/v1/room", ts=self.clock[0] - 1)[0], 200)
 
     def test_restart_does_not_reopen_the_replay_window(self):
         self.start()
@@ -380,6 +415,21 @@ class Dx5StateTest(AgentTestCase):
         self.get("/v1/state?fresh=1")
         self.assertEqual(self.dac.opens, 2)
 
+    def test_a_failed_read_drops_the_cache(self):
+        self.start()
+        self.assertEqual(self.get("/v1/state?fresh=1")[1]["status"], "read")
+        self.dac.records = {}
+        self.assertEqual(self.get("/v1/state?fresh=1")[1]["status"], "read_failed")
+        st = self.get("/v1/state")[1]
+        self.assertEqual(st["status"], "read_failed")
+        self.assertFalse(st.get("cached"))
+
+    def test_cli_default_source_is_not_a_preset(self):
+        with open(os.path.join(self.state_dir, "state.json"), "w") as fh:
+            json.dump({"source": "defaults (no cache yet)", "volume_db": -30.0}, fh)
+        self.start()
+        self.assertEqual(self.get("/v1/state")[1]["fields"]["preset"]["source"], "unknown")
+
     def test_written_preset_and_preamp_come_from_state_json(self):
         with open(os.path.join(self.state_dir, "state.json"), "w") as fh:
             json.dump({"source": "/opt/presets/bass1.json", "preamp_db": -6.0}, fh)
@@ -438,6 +488,15 @@ class LockTest(AgentTestCase):
         self.assertEqual((status, st["status"]), (423, "busy"))
         self.assertIn(f"pid {os.getpid()}", st["holder"])
         self.assertIn("in use by", st["error"])
+        self.assertEqual(self.dac.opens, 0)
+
+    def test_another_request_in_flight_is_busy(self):
+        self.start()
+        self.agent._hid.acquire()
+        self.addCleanup(self.agent._hid.release)
+        status, st = self.get("/v1/state?fresh=1")
+        self.assertEqual((status, st["status"]), (423, "busy"))
+        self.assertEqual(st["holder"], f"toppingd (pid {os.getpid()})")
         self.assertEqual(self.dac.opens, 0)
 
     def test_lock_released_after_each_read(self):
@@ -533,6 +592,13 @@ class NoReadPathTest(AgentTestCase):
         self.assertEqual(self.get("/v1/state")[1]["status"], "several")
         self.check_no_io()
 
+    def test_two_dacs_of_one_model(self):
+        self.products = ("DX5 II", "DX5 II")
+        self.start()
+        self.assertEqual(self.get("/v1/state")[1]["status"], "several")
+        self.assertIsNone(self.get("/v1/room")[1]["read_path"])
+        self.check_no_io()
+
     def test_different_dac_than_configured(self):
         self.configured = "dx1ii"
         self.start()
@@ -593,6 +659,9 @@ class ReadOnlyHandleTest(unittest.TestCase):
             d90.write(toppingctl.frame(0x71, 0x0C, 0, opcode=0x10))
         self.assertEqual(self.dac.writes, [])
 
+    def test_readnack_with_data(self):
+        self.refused(toppingctl.frame(0x71, 0x0C, 1, opcode=0x10))
+
     def test_garbage(self):
         self.refused(b"\x00" * 16)
         self.refused(b"")
@@ -605,6 +674,7 @@ class ReadOnlyHandleTest(unittest.TestCase):
 class ConfigTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.key = os.path.join(self.tmp, "key")
         with open(self.key, "wb") as fh:
             fh.write(KEY + b"\n")
