@@ -175,7 +175,7 @@ function sampleRooms() {
     { id: "office", name: "Office", model: "Topping DX5 II", host: "office", status: "confirmed", state: "ok",
       dev: -32, devGain: "Low", devPower: "Awake",
       vol: { v: -32, src: "read", age: "12 s ago" }, step: { v: 0.5, src: "read" },
-      output: { v: "Headphones, balanced", hp: true },
+      output: { v: "Headphones, balanced", hp: true, src: "read", age: "12 s ago" },
       gain: { v: "Low", src: "read", age: "12 s ago" },
       power: { v: "Awake", src: "read", age: "12 s ago" },
       preset: { v: "e3-oratory-harman-oe", src: "written", age: "2 h ago" },
@@ -187,20 +187,20 @@ function sampleRooms() {
     { id: "bedroom", name: "Bedroom", model: "Topping DX1 II", host: "bedroom", status: "unverified", state: "ok",
       dev: -40,
       vol: { v: -40, src: "read", age: "8 s ago" }, step: unknown(),
-      output: { v: "Headphones", hp: true },
+      output: { v: "Headphones", hp: true, src: "read", age: "8 s ago" },
       gain: unknown("not read: write-only on this model"),
       power: unknown(), preset: unknown(), preamp: unknown() },
     { id: "den", name: "Den", model: "Topping DX5 II", host: "den", status: "confirmed", state: "busy",
       holder: "the toppingctl CLI", dev: -28,
       vol: { v: -28, src: "read", age: "40 s ago" }, step: { v: 0.5, src: "read" },
-      output: { v: "Line out, balanced", hp: false },
+      output: { v: "Line out, balanced", hp: false, src: "read", age: "40 s ago" },
       gain: { v: "Low", src: "read", age: "40 s ago" },
       power: { v: "Awake", src: "read", age: "40 s ago" },
       preset: { v: "flat", src: "written", age: "1 day ago" }, preamp: unknown() },
     { id: "studio", name: "Studio", model: "Topping DX5 II", host: "studio", status: "confirmed", state: "down",
       lastSeen: "14 min ago", dev: -35,
       vol: { v: -35, src: "read", age: "14 min ago" }, step: { v: 0.5, src: "read" },
-      output: { v: "Line out, single-ended", hp: false },
+      output: { v: "Line out, single-ended", hp: false, src: "read", age: "14 min ago" },
       gain: { v: "Low", src: "read", age: "14 min ago" },
       power: { v: "Awake", src: "read", age: "14 min ago" },
       preset: { v: "flat", src: "written", age: "5 days ago" }, preamp: unknown() },
@@ -256,6 +256,14 @@ function prov(f, r) {
   return `<span class="prov"><span class="dot unknown"></span>Unknown · ${esc(f.why || "not read yet")}</span>`;
 }
 
+// The output is read-only (decision 1), shown inline with where it came from, like every other value.
+function outputText(r) {
+  const o = r.output;
+  if (o.v === null) return "Output unknown";
+  const last = r.state === "down" || r.state === "busy" ? ", last known" : asleep(r) ? ", before it slept" : "";
+  return `${o.v} (read ${o.age}${last})`;
+}
+
 function statePill(r) {
   const s = STATES[r.state];
   return `<span class="pill ${s.cls}">${s.pill}</span>`;
@@ -309,7 +317,7 @@ function viewList() {
       values = `<div class="label">DAC volume</div>
         <div class="row"><span class="big num val">${esc(db(r.vol.v))}</span>${asleep(r) ? `<span class="sub">asleep</span>` : ""}</div>
         <div>${prov(r.vol, r)}</div>
-        <div class="sub val" style="margin-top:6px">${esc(r.output.v || "Output unknown")} · ${esc(pre)}</div>`;
+        <div class="sub val" style="margin-top:6px">${esc(outputText(r))} · ${esc(pre)}</div>`;
     } else if (r.state === "ok" || r.state === "readfail") {
       values = `<div class="label">DAC volume</div><div class="val">Unknown</div><div>${prov(r.vol, r)}</div>`;
     }
@@ -435,7 +443,7 @@ function flush(r) {
     const fresh = r.dev, readAt = clock();
     if (fresh !== expected) {
       return settle(r, { kind: "refused", fresh, readAt,
-        text: `Changed elsewhere: ${r.name} reads ${db(fresh)}, not the ${db(expected)} this change started from. Read ${r.name} again, then set the level again.` });
+        text: `Changed elsewhere: ${r.name} reads ${db(fresh)}, not the ${db(expected)} this change started from. The level above is that fresh read; set the level again from there.` });
     }
     const err = loudError(fresh, to, S.unlock && unlock === S.unlockSeq);
     if (err) return settle(r, { kind: "refused", fresh, readAt, text: err });
@@ -638,7 +646,7 @@ function echoTarget(text) {
 function gainBlock(r) {
   const g = r.gain;
   let html = `<div class="row"><span class="grow">${g.v === null ? "Unknown" : esc(g.v) + " gain"}</span></div><div>${prov(g, r)}</div>
-    <div class="why">Gain applies to the headphone output${r.output.v ? ` (now: ${esc(r.output.v)})` : ""}. High gain counts as loud, like going above ${MINUS}10 dB.</div>`;
+    <div class="why">Gain applies to the headphone output (output: ${esc(outputText(r))}). High gain counts as loud, like going above ${MINUS}10 dB.</div>`;
   const why = whyCant(r);
   if (why) return html + `<div class="why">${esc(why)}</div>`;
   return html + `<div class="pair">
@@ -879,6 +887,7 @@ function readVol(r) {
     r.state = "ok";
     r.vol = { v: r.dev, src: "read", age: "just now" };
     r.step = { v: 0.5, src: "read" };
+    if (r.output.v !== null) r.output = { ...r.output, src: "read", age: "just now" };
     if (r.devGain !== undefined) r.gain = { v: r.devGain, src: "read", age: "just now" };
     if (r.devPower !== undefined && r.devPower !== "Asleep") r.power = { v: r.devPower, src: "read", age: "just now" };
     render();

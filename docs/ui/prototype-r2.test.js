@@ -194,7 +194,9 @@ test("a changed device refuses the change and says what to do next", () => {
   h.t.advance(1000);
   const msg = h.room().ui.msg;
   assert.equal(msg.kind, "refused");
-  assert.match(msg.text, /Read Office again, then set the level again/);
+  assert.match(msg.text, /set the level again from there/);
+  assert.doesNotMatch(msg.text, /Read Office again/, "the refusal already shows the fresh read");
+  assert.equal(h.room().vol.v, -20);
 });
 
 test("power unknown: Sleep and Wake are both enabled and the preview says so", () => {
@@ -464,4 +466,13 @@ test("the not-read room's list card shows the product string", () => {
   const h = open();
   act(h, "back");
   assert.match(app(h), /D90 III Discrete \(sample product string\) · living-room/);
+});
+
+test("the output shows where it came from, like every other value", () => {
+  const h = open();
+  act(h, "back");
+  assert.match(app(h), /Headphones, balanced \(read 12 s ago\)/);
+  assert.match(app(h), /Line out, single-ended \(read 14 min ago, last known\)/);
+  act(h, "open", { id: "office" });
+  assert.match(app(h), /output: Headphones, balanced \(read 12 s ago\)/);
 });
