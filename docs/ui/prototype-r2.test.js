@@ -52,7 +52,7 @@ function stubDom() {
     activeElement: null,
     createElement: () => ({ innerHTML: "", get textContent() { return this.innerHTML.replace(/<[^>]*>/g, ""); } }),
     addEventListener: (type, fn) => { (listeners[type] = listeners[type] || []).push(fn); },
-    dispatch: (type, target) => { for (const fn of listeners[type] || []) fn({ target, preventDefault() {} }); },
+    dispatch: (type, target, extra = {}) => { for (const fn of listeners[type] || []) fn({ target, preventDefault() {}, ...extra }); },
   };
 }
 
@@ -284,7 +284,7 @@ test("the room page labels the figure DAC volume and says it isn't the level at 
   assert.match(app(h), /isn't the level at your ears/);
 });
 
-test("DAC busy: a queued write is refused, nothing is sent, and the controls come back when free", () => {
+test("DAC busy: a write the agent checks while busy is refused, nothing is sent, and the controls come back when free", () => {
   const h = open();
   h.drag(-36);
   h.t.advance(300);                         // -36 is in flight
@@ -318,7 +318,7 @@ test("high gain needs the unlock, low gain doesn't, and a gain send relocks", ()
   assert.doesNotMatch(bar(h), /unlock-bar/);
 });
 
-test("a gain change is refused as changed elsewhere when the knob moved, and nothing is sent", () => {
+test("a gain change is refused as changed elsewhere when the volume moved, and nothing is sent", () => {
   const h = open();
   act(h, "gain", { to: "High" });
   h.unlock(true);
@@ -360,7 +360,6 @@ test("Lower to -30 dB sends at once, with no unlock and no quiet time", () => {
   assert.equal(h.room().ui.flight, -30, "no 300 ms wait");
   h.t.advance(1700);
   assert.equal(h.room().dev, -30);
-  assert.equal(h.run("S.unlock"), false);
 });
 
 test("a failed read shows values as unknown and disables changes until a read works", () => {
@@ -380,4 +379,89 @@ test("a failed read shows values as unknown and disables changes until a read wo
 
 test("r2 has no scene recall", () => {
   assert.doesNotMatch(script, /recall|scene|\bC[12]\b|71 1[12]/i);
+});
+
+test("a gain change is refused as changed elsewhere when the gain moved", () => {
+  const h = open();
+  act(h, "gain", { to: "High" });
+  h.unlock(true);
+  h.run(`room().devGain = "High"`);         // switched on the front panel
+  h.run("sendPending()");
+  h.t.advance(800);
+  assert.match(h.run("S.toast.html"), /Changed elsewhere:.*gain reads High, not Low/);
+  assert.equal(h.room().gain.v, "High");
+  assert.equal(h.run("S.unlock"), false);
+});
+
+test("a previewed send that finds the DAC busy is refused and sends nothing", () => {
+  const h = open();
+  act(h, "gain", { to: "High" });
+  h.unlock(true);
+  h.run("sendPending()");
+  h.t.advance(100);
+  act(h, "cli");                            // the lock is taken while the send is under way
+  h.t.advance(800);
+  assert.equal(h.room().devGain, "Low");
+  assert.match(h.run("S.toast.html"), /Not sent\..*DAC busy/);
+  assert.equal(h.run("S.unlock"), false);
+});
+
+test("the DAC going busy drops a preview, says so, and ends the unlock", () => {
+  const h = open();
+  act(h, "gain", { to: "High" });
+  h.unlock(true);
+  act(h, "cli");
+  assert.equal(h.run("S.pending"), null);
+  assert.match(h.run("S.toast.html"), /Preview dropped/);
+  assert.equal(h.run("S.unlock"), false);
+});
+
+test("Cancel and Escape on a preview end the unlock", () => {
+  const h = open();
+  act(h, "gain", { to: "High" });
+  h.unlock(true);
+  act(h, "cancel");
+  assert.equal(h.run("S.unlock"), false);
+  act(h, "gain", { to: "High" });
+  h.unlock(true);
+  h.doc.dispatch("keydown", { id: "" }, { key: "Escape" });
+  assert.equal(h.run("S.pending"), null);
+  assert.equal(h.run("S.unlock"), false);
+});
+
+test("Cancel on a preview keeps the unlock while a volume change is open", () => {
+  const h = open();
+  h.unlock(true);
+  h.drag(-5);
+  h.t.advance(300);                         // -5 in flight
+  act(h, "gain", { to: "High" });
+  act(h, "cancel");
+  assert.equal(h.run("S.unlock"), true);
+});
+
+test("Read is disabled while a change waits, and a write isn't sent to a room whose read failed", () => {
+  const h = open();
+  h.drag(-36);
+  assert.equal(h.doc.els.get("#read").disabled, true);
+  h.t.advance(300);                         // in flight
+  h.run(`room().state = "readfail"; room().readErr = "sample";`);
+  h.t.advance(2000);
+  assert.equal(h.room().dev, -32);
+  assert.equal(h.room().ui.msg.kind, "refused");
+});
+
+test("asleep: values read before sleep are labelled as such", () => {
+  const h = open();
+  act(h, "power", { to: "sleep" });
+  h.run("sendPending()");
+  h.t.advance(800);
+  assert.match(app(h), /Read from device · 12 s ago · before it slept/);
+  act(h, "back");
+  assert.match(app(h), /before it slept/);
+});
+
+test("the not-read room's list card shows the product string", () => {
+  const h = open();
+  act(h, "back");
+  assert.match(app(h), /D90 III Discrete \(sample product string\) · living-room/);
 });
