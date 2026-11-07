@@ -686,6 +686,8 @@ def find_devices():
                 "pid": d["product_id"],
                 "product": d.get("product_string") or "?",
                 "known": key is not None,
+                # One DAC presents several HID interfaces on one serial.
+                "serial": d.get("serial_number"),
             }
         )
     return found

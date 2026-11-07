@@ -1,0 +1,10 @@
+# toppingd config: /etc/toppingd/toppingd.yaml. See toppingd.py and the plan,
+# docs/plans/2026-10-26-web-ui-architecture-plan.md ("toppingd on each audio host").
+# Unknown keys are refused. Nothing here can make an unverified model writable.
+
+listen: 0.0.0.0:8740          # (proposal) port
+# room: office                # defaults to the hostname
+device: auto                  # or a DEVICES key; auto = match the product string
+mode: dry-run                 # the only mode this build runs: it is read-only
+key_file: /etc/toppingd/key   # HMAC key shared with toppingweb, mode 0600
+state_dir: /var/lib/toppingctl
