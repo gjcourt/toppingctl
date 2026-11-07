@@ -532,6 +532,8 @@ class LockTest(AgentTestCase):
         fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
         self.addCleanup(os.close, fd)
         fcntl.flock(fd, fcntl.LOCK_EX)  # another open file: conflicts as a CLI would
+        # The record a CLI holder writes; without /proc it is the only source.
+        os.pwrite(fd, f"toppingctl {os.getpid()}\n".encode(), 0)
         t0 = time.monotonic()
         status, st = self.get("/v1/state?fresh=1")
         self.assertLess(time.monotonic() - t0, 2.0)
@@ -539,6 +541,38 @@ class LockTest(AgentTestCase):
         self.assertIn(f"pid {os.getpid()}", st["holder"])
         self.assertIn("in use by", st["error"])
         self.assertEqual(self.dac.opens, 0)
+
+    def test_busy_holder_from_the_record_without_proc(self):
+        # macOS has no /proc/locks: the holder comes from the lock file's record.
+        self.start()
+        p = mock.patch.object(toppingctl, "_proc_locks_holder", lambda fd: None)
+        p.start()
+        self.addCleanup(p.stop)
+        path = os.path.join(self.lockdir, "device.lock")
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        os.pwrite(fd, f"toppingctl {os.getpid()}\n".encode(), 0)
+        status, st = self.get("/v1/state?fresh=1")
+        self.assertEqual((status, st["status"]), (423, "busy"))
+        self.assertEqual(st["holder"], f"toppingctl (pid {os.getpid()})")
+
+    def test_room_reports_the_device_lock(self):
+        self.start()
+        room = self.get("/v1/room")[1]
+        self.assertEqual(
+            room["device_lock"], {"path": os.path.join(self.lockdir, "device.lock"), "ok": True}
+        )
+
+    def test_room_reports_an_unusable_device_lock(self):
+        self.start()
+        os.chmod(self.lockdir, 0o777)  # group/other-writable: refused
+        self.addCleanup(os.chmod, self.lockdir, 0o700)
+        room = self.get("/v1/room")[1]
+        self.assertFalse(room["device_lock"]["ok"])
+        self.assertIn("cannot use the device lock", room["device_lock"]["error"])
+        # A read still runs without it, as the CLI's reads do.
+        self.assertEqual(self.get("/v1/state?fresh=1")[1]["status"], "read")
 
     def test_another_request_in_flight_is_busy(self):
         self.start()

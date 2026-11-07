@@ -6,7 +6,8 @@ build serves identity and state and sends no writes at all: it has no write
 route, its only mode is dry-run, and its handle wrapper refuses any frame
 that is not a readNack in CONFIRMED_READS for the model.
 
-    GET /v1/room             identity: host, room, DAC, read path, mode
+    GET /v1/room             identity: host, room, DAC, read path, mode, and
+                             whether the device lock file can be opened
     GET /v1/state[?fresh=1]  state from the model's read path; fresh=1 reads
                              the device, otherwise the cached read and its age
 
@@ -485,6 +486,7 @@ class Agent:
             "version": VERSION,
             "dac": dac,
             "read_path": read_path(key) if key else None,
+            "device_lock": device_lock_status(),
             "capabilities": {
                 # Read-only build: no model gets a write, confirmed or not.
                 "writes": [],
@@ -583,7 +585,7 @@ class Agent:
                 "busy", toppingctl.busy_message(e.holder), http=423, holder=e.holder
             ) from None
         except OSError as e:
-            log(f"warning: cannot use the device lock {toppingctl.lock_path()}: {e.strerror}")
+            log(f"warning: {_lock_problem(e)}")
             held = False
         try:
             yield
@@ -607,6 +609,22 @@ class Agent:
         raise Unavailable(
             "busy", f"could not open the DAC ({last}); another app may hold it", http=423
         )
+
+
+def _lock_problem(e):
+    return f"cannot use the device lock {toppingctl.lock_path()}: {e.strerror or e}"
+
+
+def device_lock_status():
+    """Whether the shared device lock file can be opened right now. Reads run
+    without it when it can't (as the CLI's do), so /v1/room says so rather
+    than leaving it to a log line. Opens and closes; never takes the lock."""
+    try:
+        fd, _ = toppingctl._open_lock(toppingctl.lock_path())
+    except OSError as e:
+        return {"path": toppingctl.lock_path(), "ok": False, "error": _lock_problem(e)}
+    os.close(fd)
+    return {"path": toppingctl.lock_path(), "ok": True}
 
 
 # --- HTTP ---------------------------------------------------------------------
