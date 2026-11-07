@@ -182,9 +182,11 @@ class Auth:
     def _synced_floor(self):
         """The floor, taken the first time the clock reports sync -- not at
         process start, when fake-hwclock may have left it far behind. It is
-        the next whole second, so a request accepted by a process that
-        restarted within the same second can't be replayed. Once watch() is
-        running, only the watcher takes it. timedatectl runs outside _mu."""
+        the next whole second, so a request signed before the restart
+        second can't be replayed. One signed up to SKEW_SECS ahead of this
+        host's clock still could be: the floor bounds the replay window, it
+        doesn't close it. Once watch() is running, only the watcher takes
+        it. timedatectl runs outside _mu."""
         if self.floor is not None or self._watching:
             return self.floor
         with self._mu:
@@ -451,8 +453,9 @@ class Unavailable(Exception):
     """The device couldn't be used for this read. `status` is the room state
     the plan names: busy (423) or read_failed."""
 
-    def __init__(self, status, message, http=200, holder=None):
+    def __init__(self, status, message, http=200, holder=None, internal=False):
         super().__init__(message)
+        self.internal = internal  # busy with another request to this agent
         self.status = status
         self.message = message
         self.http = http
@@ -522,9 +525,11 @@ class Agent:
         try:
             at, fields, settings, volumes = self._device_read(key, path)
         except Unavailable as e:
-            # Busy says nothing about the room, so the last read stays
-            # servable, with its age; a failed read replaces it.
-            if e.status != "busy":
+            # Busy with this agent's own read says nothing new about the
+            # room, so the last read stays servable, with its age. Another
+            # process holding the DAC (the CLI, perhaps writing) or a failed
+            # read does: the cache goes.
+            if not e.internal:
                 self._cache = None
             body = self._base(dac, e.status, reason=e.message, error=e.message)
             if e.holder:
@@ -542,7 +547,9 @@ class Agent:
         deadline = time.monotonic() + AGENT_LOCK_WAIT
         if not self._hid.acquire(timeout=AGENT_LOCK_WAIT):
             holder = f"{PROG} (pid {os.getpid()})"
-            raise Unavailable("busy", toppingctl.busy_message(holder), http=423, holder=holder)
+            raise Unavailable(
+                "busy", toppingctl.busy_message(holder), http=423, holder=holder, internal=True
+            )
         try:
             with self._device_lock(max(0.0, deadline - time.monotonic())):
                 h = self._open(key)

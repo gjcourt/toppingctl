@@ -331,18 +331,14 @@ class NtpFloorTest(AgentTestCase):
     def test_requests_before_sync_dont_take_the_floor_once_watched(self):
         self.synced[0] = False
         self.start()
-        self.auth.recheck_secs = 0.05
+        self.auth.recheck_secs = 60  # the watcher checks once, then sleeps
         self.auth.watch()
-        self.assertEqual(self.call("/v1/room")[0], 503)
+        time.sleep(0.05)
         self.synced[0] = True
-        for _ in range(200):
-            if self.auth.floor is not None:
-                break
-            time.sleep(0.01)
-        floor = self.auth.floor
-        self.clock[0] += 3
-        self.assertEqual(self.call("/v1/room", ts=self.clock[0] - 1)[0], 200)
-        self.assertEqual(self.auth.floor, floor)
+        # The clock has synced but the watcher hasn't looked yet: a request
+        # must not take the floor itself.
+        self.assertEqual(self.call("/v1/room")[0], 503)
+        self.assertIsNone(self.auth.floor)
 
     def test_restart_in_the_same_second_does_not_reopen_the_window(self):
         self.start()
@@ -468,6 +464,15 @@ class Dx5StateTest(AgentTestCase):
             self.agent._hid.release()
         st = self.get("/v1/state")[1]
         self.assertEqual((st["status"], st["cached"]), ("read", True))
+
+    def test_device_lock_busy_drops_the_cached_read(self):
+        self.start()
+        self.get("/v1/state?fresh=1")
+        fd = os.open(os.path.join(self.lockdir, "device.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        self.assertEqual(self.get("/v1/state?fresh=1")[0], 423)
+        self.assertEqual(self.get("/v1/state")[0], 423)  # read again, not cached
 
     def test_cli_default_source_is_not_a_preset(self):
         with open(os.path.join(self.state_dir, "state.json"), "w") as fh:
