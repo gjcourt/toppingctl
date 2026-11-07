@@ -49,6 +49,12 @@ any write — see [AGENTS.md](AGENTS.md) for why. Full command and flag referenc
 D90 III's UAC2-only volume) and the device-verification workflow are in
 [AGENTS.md](AGENTS.md).
 
+`toppingd.py` is the per-host agent for the planned web UI
+([plan](docs/plans/2026-10-26-web-ui-architecture-plan.md)). This build is
+read-only: it serves `GET /v1/room` and `GET /v1/state` to HMAC-signed requests and
+sends no writes. Its config is YAML; see
+[`toppingd.yaml.example`](toppingd.yaml.example). It also needs `pyyaml`.
+
 ## Configuration
 
 | Name | Default | Meaning |

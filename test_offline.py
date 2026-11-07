@@ -1716,5 +1716,35 @@ class Dx5iiDryRunFramesAreConfirmedTest(unittest.TestCase):
                     self.assertIn((b[5], b[6]), allowed, hexed)
 
 
+class Dx1SharedHandleTest(unittest.TestCase):
+    """dx1_state reads through a passed-in handle and leaves it open, as
+    read_settings does, so toppingd's read is one open."""
+
+    def test_passed_handle_is_used_and_left_open(self):
+        writes, closed = [], []
+
+        class Handle(_make_fake_hid(writes)):
+            def close(self):
+                closed.append(self)
+
+        with (
+            mock.patch.object(devstate, "open_checked", side_effect=AssertionError("opened")),
+            mock.patch.object(devstate, "_frames", lambda h, secs: []),
+        ):
+            st = devstate.dx1_state("dx1ii", skip_peq_dump=True, h=Handle())
+        self.assertEqual(st["configs"], None)
+        self.assertTrue(writes)
+        self.assertEqual(closed, [])
+
+
+def load_tests(loader, tests, pattern):
+    """CI runs `python -m unittest test_offline`; this adds the toppingd API
+    tests (test_toppingd.py) to that run, so they need no workflow change."""
+    import test_toppingd
+
+    tests.addTests(loader.loadTestsFromModule(test_toppingd))
+    return tests
+
+
 if __name__ == "__main__":
     unittest.main()
