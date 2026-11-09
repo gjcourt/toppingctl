@@ -15,8 +15,9 @@ readNack in CONFIRMED_READS for the model.
                              device, checks expected_db against that read in
                              raw units (409 changed), applies the -10 dB rule,
                              and returns the frames, with an undo token
-    POST /v1/volume/lower    {}: "Lower to -30 dB" -- if the fresh read is louder
-                             than -30 dB, -30 dB with no expected_db (no 409)
+                             {target_db, lower_if_louder: true}: "Lower to
+                             -30 dB" -- no expected_db, no 409; writes only if
+                             the fresh read is louder than the target
     POST /v1/unlocks         {} -> {unlock_id, expires_at}: 60 s above -10 dB
     DELETE /v1/unlocks/{id}  discards an unlock
 
@@ -105,9 +106,7 @@ MODES = ("dry-run",)
 # writes don't consume an unlock; only the cap, DELETE or a 409 ends it.
 UNLOCK_SECS = 60
 UNLOCK_ID = re.compile(r"[A-Za-z0-9_-]{16,64}")
-VOLUME_KEYS = {"target_db", "expected_db", "unlock_id"}
-# "Lower to -30 dB" (design rule 5; prototype r2's LOWER_TO).
-LOWER_TO_DB = -30.0
+VOLUME_KEYS = {"target_db", "expected_db", "unlock_id", "lower_if_louder"}
 # The frames a volume write is: 71 02 and the commit.
 VOLUME_WRITES = frozenset([(REG_CTRL, SUB_VOLUME), (REG_CTRL, SUB_COMMIT)])
 # GetSettings record indexes (vendor_commands.SETTINGS_FIELDS).
@@ -644,7 +643,13 @@ class Agent:
     def volume(self, body):
         """POST /v1/volume {target_db, expected_db, unlock_id?}: every volume
         change, undo included. Reads the device, then decides in the same
-        operation (_volume_decision). Dry-run: the frames come back, unsent."""
+        operation (_volume_decision). Dry-run: the frames come back, unsent.
+
+        {target_db, lower_if_louder: true} is "Lower to -30 dB": "Always
+        lower if louder" (George, 2026-11-08, #40 Q8). expected_db is neither
+        required nor compared, so it never answers 409; if the fresh read is
+        louder than the target it plans the target (quieter, so no unlock),
+        otherwise it plans nothing and answers 200."""
         if not isinstance(body, dict):
             raise BadRequest("the body must be a JSON object")
         extra = set(body) - VOLUME_KEYS
@@ -653,28 +658,22 @@ class Agent:
                 f"unknown keys {', '.join(sorted(extra))}: /v1/volume sets volume only; "
                 "other changes go through /v1/plans"
             )
-        target, expected = _number(body, "target_db"), _number(body, "expected_db")
+        lower = body.get("lower_if_louder", False)
+        if not isinstance(lower, bool):
+            raise BadRequest("lower_if_louder must be true or false")
+        target = _number(body, "target_db")
+        expected = None if lower else _number(body, "expected_db")
         uid = body.get("unlock_id")
         if uid is not None and not (isinstance(uid, str) and UNLOCK_ID.fullmatch(uid)):
             raise BadRequest("unlock_id must be an id from POST /v1/unlocks")
-        return self._volume_op(target, expected, uid)
-
-    def lower(self, body):
-        """POST /v1/volume/lower {}: "Lower to -30 dB". "Always lower if
-        louder" (George, 2026-11-08, #40 Q8): re-read, and if the room is
-        louder than LOWER_TO_DB set it, with no expected_db and so no 409.
-        At or below LOWER_TO_DB already, nothing is planned. Never needs an
-        unlock: it is only ever quieter."""
-        if body != {}:
-            raise BadRequest("POST /v1/volume/lower takes {}")
-        status, obj = self._volume_op(LOWER_TO_DB, None, None)
-        if status == 200:
+        status, obj = self._volume_op(target, expected, uid)
+        if lower and status == 200:
             obj.setdefault("lowered", True)
         return status, obj
 
     def _volume_op(self, target, expected, uid):
         """The model checks, then the read and the decision under one lock
-        and open. expected=None is Lower to -30 dB: no compare-and-set."""
+        and open. expected=None is lower_if_louder: no compare-and-set."""
         dac = identify(self.configured_device)
         key = dac.get("key") if dac["status"] == "found" else None
         if key is None:
@@ -705,7 +704,7 @@ class Agent:
     def _volume_decision(self, spec, key, rec, target, expected, uid):
         """The plan's rules, in its order: (a) compare-and-set on expected_db
         in raw units, (b) the -10 dB rule before and after quantising.
-        expected=None is Lower to -30 dB, which skips (a) by decision Q8."""
+        expected=None is lower_if_louder, which skips (a) by decision Q8."""
         if REC_VOLUME not in rec or REC_VOLUME_STEP not in rec:
             # The read worked (and is cached); it just can't anchor a write.
             return 503, {
@@ -979,7 +978,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "/v1/room": {"GET": self._room},
                 "/v1/state": {"GET": self._state},
                 "/v1/volume": {"POST": lambda q, b: self.agent.volume(_json(b))},
-                "/v1/volume/lower": {"POST": lambda q, b: self.agent.lower(_json(b))},
                 "/v1/unlocks": {"POST": self._unlock},
             }.get(url.path)
         if methods is None:

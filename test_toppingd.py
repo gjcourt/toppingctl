@@ -418,7 +418,7 @@ class RoutesTest(AgentTestCase):
             ("POST", "/v1/volume", {"target_db": -5, "expected_db": -30, "unlock_id": uid}),
             ("POST", "/v1/volume", {"target_db": -40, "expected_db": -30}),
             ("POST", "/v1/volume", {"target_db": -40, "expected_db": -31, "unlock_id": uid}),
-            ("POST", "/v1/volume/lower", {}),
+            ("POST", "/v1/volume", {"target_db": -45, "lower_if_louder": True}),
             ("DELETE", f"/v1/unlocks/{uid}", None),
         ]
         for method, path, body in calls:
@@ -1154,15 +1154,16 @@ class UndoTest(VolumeTestCase):
 
 
 class LowerTest(VolumeTestCase):
-    """POST /v1/volume/lower: "Always lower if louder" (George, 2026-11-08,
-    #40 Q8). No expected_db, so no 409; never an unlock; never raises."""
+    """{target_db, lower_if_louder: true}: "Always lower if louder" (George,
+    2026-11-08, #40 Q8). expected_db isn't required or compared, so no 409;
+    never an unlock; never raises the level."""
 
     def setUp(self):
         super().setUp()
         self.start()
 
-    def lower(self, body=None):
-        return self.send("/v1/volume/lower", {} if body is None else body)
+    def lower(self, target=-30, **extra):
+        return self.send("/v1/volume", {"target_db": target, "lower_if_louder": True, **extra})
 
     def test_louder_room_is_lowered_without_expected_or_unlock(self):
         # The knob went to -5 elsewhere; the UI never saw it, and needn't.
@@ -1177,46 +1178,60 @@ class LowerTest(VolumeTestCase):
         self.assertEqual(out["undo"], {"target_db": -5.0, "expected_db": -30.0})
         self.assert_no_write_sent()
 
-    def test_one_step_louder_than_minus_30_is_lowered(self):
+    def test_stale_expected_is_not_compared(self):
+        # The UI last read -40; the room is at -12 now. No 409.
+        self.level(-12)
+        status, out = self.lower(expected_db=-40)
+        self.assertEqual((status, out["lowered"]), (200, True))
+        self.assertEqual(out["frames"][0]["hex"], _vol_frame(30))
+
+    def test_one_step_louder_than_the_target_is_lowered(self):
         for db, step, raw in ((-29, 1, 30), (-29.5, 0, 60)):
             with self.subTest(db=db, step=step):
                 self.level(db, step=step)
                 status, out = self.lower()
                 self.assertEqual((status, out["lowered"]), (200, True))
                 self.assertEqual(out["frames"][0]["hex"], _vol_frame(raw))
-        self.level(-30, step=1)
-        self.assertEqual(self.lower()[1]["frames"], [])
 
-    def test_half_db_step(self):
-        self.level(-20.5, step=0)
-        status, out = self.lower()
-        self.assertEqual((status, out["frames"][0]["hex"]), (200, _vol_frame(60)))
-
-    def test_at_or_below_minus_30_plans_nothing(self):
-        for db in (-30, -30.5, -60):
-            with self.subTest(db=db):
-                self.level(db, step=0)
+    def test_already_at_or_below_the_target_is_a_no_op(self):
+        for db, step in ((-30, 1), (-30, 0), (-30.5, 0), (-60, 1)):
+            with self.subTest(db=db, step=step):
+                self.level(db, step=step)
                 status, out = self.lower()
                 self.assertEqual((status, out["lowered"], out["frames"]), (200, False, []))
                 self.assertNotIn("undo", out)
         self.assert_no_write_sent()
 
-    def test_takes_only_an_empty_body(self):
-        for body in ({"expected_db": -30}, {"target_db": -40}, {"unlock_id": "x" * 32}, []):
-            with self.subTest(body=body):
-                self.assertEqual(self.lower(body)[0], 400)
-        self.assertEqual(self.send("/v1/volume/lower", method="GET")[0], 405)
+    def test_never_needs_an_unlock(self):
+        # Lowering from 0 to -5 lands above -10, but it is quieter.
+        self.level(0)
+        status, out = self.lower(-5)
+        self.assertEqual((status, out["after_predicted"]["db"]), (200, -5.0))
+        self.assertTrue(out["loud_result"])
+
+    def test_option_must_be_a_boolean(self):
+        for value in ("yes", 1, None):
+            with self.subTest(value=value):
+                status, _ = self.send(
+                    "/v1/volume", {"target_db": -30, "expected_db": -30, "lower_if_louder": value}
+                )
+                self.assertEqual(status, 400)
         self.assertEqual(self.dac.opens, 0)
+
+    def test_without_the_option_expected_is_required_and_compared(self):
+        self.level(-5)
+        self.assertEqual(self.send("/v1/volume", {"target_db": -30})[0], 400)
+        self.assertEqual(self.volume(-30, -20)[0], 409)
+        status, _ = self.send(
+            "/v1/volume", {"target_db": -30, "expected_db": -20, "lower_if_louder": False}
+        )
+        self.assertEqual(status, 409)
 
     def test_does_not_touch_unlocks(self):
         uid = self.unlock()
         self.level(-5)
-        self.assertEqual(self.lower()[0], 200)
+        self.assertEqual(self.lower(unlock_id=uid)[0], 200)
         self.assertEqual(self.volume(-4, -5, uid)[0], 200)
-
-    def test_ordinary_writes_keep_compare_and_set(self):
-        self.level(-5)
-        self.assertEqual(self.volume(-30, -20)[0], 409)
 
     def test_undo_of_a_lower_is_an_ordinary_write(self):
         # Undoing back to -5 raises above -10: it needs the unlock, and it
