@@ -1177,6 +1177,16 @@ class LowerTest(VolumeTestCase):
         self.assertEqual(out["undo"], {"target_db": -5.0, "expected_db": -30.0})
         self.assert_no_write_sent()
 
+    def test_one_step_louder_than_minus_30_is_lowered(self):
+        for db, step, raw in ((-29, 1, 30), (-29.5, 0, 60)):
+            with self.subTest(db=db, step=step):
+                self.level(db, step=step)
+                status, out = self.lower()
+                self.assertEqual((status, out["lowered"]), (200, True))
+                self.assertEqual(out["frames"][0]["hex"], _vol_frame(raw))
+        self.level(-30, step=1)
+        self.assertEqual(self.lower()[1]["frames"], [])
+
     def test_half_db_step(self):
         self.level(-20.5, step=0)
         status, out = self.lower()
