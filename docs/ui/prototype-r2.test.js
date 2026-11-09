@@ -508,7 +508,7 @@ test("Q5: asleep, Wake is offered in the banner without opening More", () => {
   h.t.advance(800);
   act(h, "back");
   act(h, "open", { id: "office" });
-  assert.match(app(h), /id="wake-banner"/);
+  assert.match(app(h), /data-act="power" data-to="wake" id="wake-banner"/);
   assert.doesNotMatch(app(h), /<h2>Power<\/h2>/);
   act(h, "power", { to: "wake" });
   assert.match(bar(h), /Wake Office/);
@@ -537,7 +537,7 @@ test("Q8: Lower re-reads and lowers when the room changed elsewhere, instead of 
   assert.equal(h.room().dev, -30);
   assert.equal(h.room().vol.v, -30);
   assert.equal(h.room().ui.msg.kind, "set");
-  assert.match(h.doc.els.get("#vol-status").innerHTML, /changed elsewhere to −3\.0 dB since the last read/);
+  assert.match(h.doc.els.get("#vol-status").innerHTML, /Lower read −3\.0 dB just before, not the level shown/);
   assert.equal(h.room().ui.undoTo, -3, "undo names the level it really lowered from");
 });
 
@@ -565,6 +565,28 @@ test("Q8: a Lower queued behind a refused write still goes", () => {
   h.t.advance(4000);
   assert.equal(h.room().dev, -30);
   assert.equal(h.room().ui.msg.kind, "set");
+  assert.match(h.doc.els.get("#vol-status").innerHTML, /Before Lower: not sent\. Changed elsewhere: Office reads −4\.0 dB/,
+    "the refusal it went behind stays on screen");
+});
+
+test("Q8: Lower on a room that can't take it says why instead of doing nothing", () => {
+  const h = open();
+  h.run(`room().dev = -6; room().vol = { v: -6, src: "read", age: "x" }; refreshVolume();`);
+  act(h, "cli");                            // the DAC goes busy before the tap
+  act(h, "lower");
+  assert.match(h.run("S.toast.html"), /Not sent\..*busy/);
+  assert.equal(h.room().dev, -6);
+});
+
+test("Q5: the closed More summary marks busy values as last known and asleep power as last sent", () => {
+  const den = open("den");
+  assert.match(app(den), /Low gain · Awake · Flat: no correction \(last written\) · last known/);
+  const h = open();
+  act(h, "more");
+  act(h, "power", { to: "sleep" });
+  h.run("sendPending()");
+  h.t.advance(800);
+  assert.match(app(h), /Asleep \(as last sent\)/);
 });
 
 test("Q8: dragging after Lower replaces it with an ordinary change", () => {

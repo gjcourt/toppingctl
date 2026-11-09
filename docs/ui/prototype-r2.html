@@ -239,7 +239,7 @@ function sampleRooms() {
 }
 
 let S;
-function newRoomUi() { return { want: null, wantUnlock: null, wantLower: false, flight: null, timer: null, msg: null, undoTo: null, burstBase: null, err: "", reading: false }; }
+function newRoomUi() { return { want: null, wantUnlock: null, wantLower: false, prior: null, flight: null, timer: null, msg: null, undoTo: null, burstBase: null, err: "", reading: false }; }
 function reset() {
   if (S) {
     S.rooms.forEach((r) => clearTimeout(r.ui.timer));
@@ -374,8 +374,8 @@ function viewRoom() {
     banner = `<div class="banner info"><strong>View only.</strong> The ${esc(r.model)} isn't confirmed for toppingctl, so this page can't change anything on it.</div>`;
   } else if (asleep(r)) {
     // Wake lives under More with power, so the banner offers it too: asleep, it's the only change there is.
-    banner = `<div class="banner info" role="status"><strong>Asleep</strong>, as last sent from this page. What the DAC reports while asleep hasn't been measured yet, so the values below are from before it slept. Wake it to change anything.
-      <br><button data-act="power" data-to="wake" id="wake-banner">Wake ${esc(r.name)} (shows a preview)</button></div>`;
+    banner = `<div class="banner info"><div role="status"><strong>Asleep</strong>, as last sent from this page. What the DAC reports while asleep hasn't been measured yet, so the values below are from before it slept. Wake it to change anything.</div>
+      <button data-act="power" data-to="wake" id="wake-banner" ${S.sending ? "disabled" : ""}>Wake ${esc(r.name)} (shows a preview)</button></div>`;
   }
   const identity = r.product ? `${esc(r.product)} · ${esc(r.host)}` : `${esc(r.model)} · ${esc(r.host)}`;
   if (r.state === "nodac") {
@@ -401,12 +401,14 @@ function viewRoom() {
 function moreBlock(r) {
   const names = (hasHeadphones(r) ? ["headphone gain"] : []).concat(["power", "EQ preset"]);
   const now = (hasHeadphones(r) ? [r.gain.v === null ? "gain unknown" : r.gain.v + " gain"] : [])
-    .concat([r.power.v === null ? "power unknown" : r.power.v,
+    .concat([r.power.v === null ? "power unknown" : r.power.v + (r.power.src === "written" ? " (as last sent)" : ""),
       r.preset.v ? presetName(r.preset.v) + " (last written)" : "EQ preset unknown"]);
+  const last = r.state === "down" || r.state === "busy" ? " · last known"
+    : asleep(r) && hasHeadphones(r) ? " · gain read before it slept" : "";
   const label = "More: " + names.join(", ");
-  let html = `<button class="more" id="more" data-act="more" aria-expanded="${S.more}" aria-controls="more-body">
+  let html = `<button class="more" id="more" data-act="more" aria-expanded="${S.more}"${S.more ? ` aria-controls="more-body"` : ""}>
       <span class="more-name">${S.more ? "▾" : "▸"} ${esc(label)}</span>
-      <span class="sub">${esc(now.join(" · "))}</span></button>`;
+      <span class="sub">${esc(now.join(" · ") + last)}</span></button>`;
   if (!S.more) return html;
   html += `<div id="more-body">`;
   if (hasHeadphones(r)) html += `<h2>Headphone gain</h2><div class="card">${gainBlock(r)}</div>`;
@@ -446,7 +448,7 @@ function request(r, raw) {
     : loudError(base, raw, S.unlock) || loudError(base, to, S.unlock)) || "";
   if (r.ui.err) { if (r.ui.err !== prevErr) say(r.ui.err); refreshVolume(); return; }
   if (r.ui.flight === null && r.ui.want === null) r.ui.burstBase = base;
-  r.ui.wantLower = false;            // input after "Lower to -30 dB" replaces it
+  r.ui.wantLower = false; r.ui.prior = null;   // input after "Lower to -30 dB" replaces it
   if (to === base && r.ui.flight === null) {
     clearTimeout(r.ui.timer); r.ui.timer = null; r.ui.want = null;
     r.ui.msg = { kind: "none" };
@@ -515,7 +517,11 @@ function settle(r, res) {
   } else {
     if (res.fresh !== undefined) r.vol = { v: res.fresh, src: "read", age: "at " + res.readAt };  // a busy refusal read nothing
     r.ui.msg = res;
-    if (r.ui.wantLower) { flush(r); return; }   // a queued Lower still goes: it doesn't depend on the old value
+    if (r.ui.wantLower) {           // a queued Lower still goes: it doesn't depend on the old value
+      say(plain(statusHtml(r)));
+      r.ui.prior = res;             // and the refusal stays on screen above its result
+      flush(r); return;
+    }
     r.ui.want = null;               // input typed against the old value is dropped
     r.ui.wantLower = false;
     clearTimeout(r.ui.timer); r.ui.timer = null;
@@ -557,7 +563,11 @@ function relock() {
 // goes next. The button goes away once the write starts, so focus moves to the
 // level it changes.
 function lowerNow(r) {
-  if (!canVol(r)) return;
+  if (!canVol(r)) {
+    S.toast = { room: r.id, kind: "bad", html: `<strong>Not sent.</strong> ${esc(whyCant(r))}` };
+    render(); say(plain(S.toast.html)); return;
+  }
+  r.ui.prior = null;
   clearTimeout(r.ui.timer); r.ui.timer = null;
   if (r.ui.flight === null && r.ui.want === null) r.ui.burstBase = r.vol.v;
   r.ui.err = ""; r.ui.undoTo = null;
@@ -621,6 +631,10 @@ function readButton(r) {
 function statusHtml(r) {
   const u = r.ui, m = u.msg || {};
   const lines = [];
+  if (u.prior) {
+    const pm = u.prior;
+    lines.push(`<div class="st ${pm.kind}">Before Lower: ${pm.kind === "failed" ? `the write failed (${esc(pm.error)}) and may or may not have landed.` : `not sent. ${esc(pm.text)}`}</div>`);
+  }
   if (u.flight !== null) lines.push(`<div class="st sending">Sending ${esc(db(u.flight))} to ${esc(r.host)}… not set yet.</div>`);
   if (u.want !== null) {
     lines.push(`<div class="st waiting">${u.flight !== null ? "Queued behind that write" : "Waiting for you to stop"}: ${esc(db(u.want))}. Not sent yet. <button class="link" data-act="cancelvol">Cancel</button></div>`);
@@ -629,7 +643,7 @@ function statusHtml(r) {
     if (m.kind === "set") {
       const lw = m.lowered;
       lines.push(`<div class="st set">Set to ${esc(db(r.vol.v))}, read back from the device.` +
-        (lw && lw.moved ? ` It had changed elsewhere to ${esc(db(lw.from))} since the last read; Lower used that fresh read.` : "") +
+        (lw && lw.moved ? ` Lower read ${esc(db(lw.from))} just before, not the level shown, and lowered from there.` : "") +
         (u.undoTo !== null ? ` <button class="link" data-act="undo">Undo (back to ${esc(db(u.undoTo))})</button>` : "") + `</div>`);
     } else if (m.kind === "refused") {
       lines.push(`<div class="st refused">Not sent. ${esc(m.text)}</div>`);
@@ -733,8 +747,8 @@ function powerBlock(r) {
   const why = r.state !== "ok" || r.status !== "confirmed" ? whyCant(r) : "";
   if (why) return html + `<div class="why">${esc(why)}</div>`;
   return html + `<div class="pair">
-      <button data-act="power" data-to="sleep" ${p.v === "Asleep" ? "disabled" : ""}>Sleep ${esc(r.name)}</button>
-      <button data-act="power" data-to="wake" ${p.v === "Awake" ? "disabled" : ""}>Wake ${esc(r.name)}</button></div>
+      <button id="power-sleep" data-act="power" data-to="sleep" ${p.v === "Asleep" ? "disabled" : ""}>Sleep ${esc(r.name)}</button>
+      <button id="power-wake" data-act="power" data-to="wake" ${p.v === "Awake" ? "disabled" : ""}>Wake ${esc(r.name)}</button></div>
     <div class="why">Sleep and wake show a preview before anything is sent. Waking resumes the level the DAC stored, so the page reads it straight after.</div>`;
 }
 
