@@ -418,6 +418,7 @@ class RoutesTest(AgentTestCase):
             ("POST", "/v1/volume", {"target_db": -5, "expected_db": -30, "unlock_id": uid}),
             ("POST", "/v1/volume", {"target_db": -40, "expected_db": -30}),
             ("POST", "/v1/volume", {"target_db": -40, "expected_db": -31, "unlock_id": uid}),
+            ("POST", "/v1/volume/lower", {}),
             ("DELETE", f"/v1/unlocks/{uid}", None),
         ]
         for method, path, body in calls:
@@ -1150,6 +1151,82 @@ class UndoTest(VolumeTestCase):
         self.assertEqual(out["after_predicted"]["db"], -6.0)
         self.assertTrue(out["loud_result"])
         self.assert_no_write_sent()
+
+
+class LowerTest(VolumeTestCase):
+    """POST /v1/volume/lower: "Always lower if louder" (George, 2026-11-08,
+    #40 Q8). No expected_db, so no 409; never an unlock; never raises."""
+
+    def setUp(self):
+        super().setUp()
+        self.start()
+
+    def lower(self, body=None):
+        return self.send("/v1/volume/lower", {} if body is None else body)
+
+    def test_louder_room_is_lowered_without_expected_or_unlock(self):
+        # The knob went to -5 elsewhere; the UI never saw it, and needn't.
+        self.level(-5)
+        status, out = self.lower()
+        self.assertEqual(status, 200)
+        self.assertEqual((out["lowered"], out["sent"]), (True, False))
+        self.assertEqual(out["before"]["db"], -5.0)
+        self.assertEqual(out["after_predicted"]["db"], -30.0)
+        self.assertEqual(out["frames"][0]["hex"], _vol_frame(30))
+        self.assertFalse(out["loud_result"])
+        self.assertEqual(out["undo"], {"target_db": -5.0, "expected_db": -30.0})
+        self.assert_no_write_sent()
+
+    def test_half_db_step(self):
+        self.level(-20.5, step=0)
+        status, out = self.lower()
+        self.assertEqual((status, out["frames"][0]["hex"]), (200, _vol_frame(60)))
+
+    def test_at_or_below_minus_30_plans_nothing(self):
+        for db in (-30, -30.5, -60):
+            with self.subTest(db=db):
+                self.level(db, step=0)
+                status, out = self.lower()
+                self.assertEqual((status, out["lowered"], out["frames"]), (200, False, []))
+                self.assertNotIn("undo", out)
+        self.assert_no_write_sent()
+
+    def test_takes_only_an_empty_body(self):
+        for body in ({"expected_db": -30}, {"target_db": -40}, {"unlock_id": "x" * 32}, []):
+            with self.subTest(body=body):
+                self.assertEqual(self.lower(body)[0], 400)
+        self.assertEqual(self.send("/v1/volume/lower", method="GET")[0], 405)
+        self.assertEqual(self.dac.opens, 0)
+
+    def test_does_not_touch_unlocks(self):
+        uid = self.unlock()
+        self.level(-5)
+        self.assertEqual(self.lower()[0], 200)
+        self.assertEqual(self.volume(-4, -5, uid)[0], 200)
+
+    def test_ordinary_writes_keep_compare_and_set(self):
+        self.level(-5)
+        self.assertEqual(self.volume(-30, -20)[0], 409)
+
+    def test_undo_of_a_lower_is_an_ordinary_write(self):
+        # Undoing back to -5 raises above -10: it needs the unlock, and it
+        # keeps compare-and-set like any other volume write.
+        self.level(-5)
+        token = self.lower()[1]["undo"]
+        self.level(-30)
+        status, out = self.volume(token["target_db"], token["expected_db"])
+        self.assertEqual((status, out["error"]), (403, "unlock_required"))
+        self.assertEqual(
+            self.volume(token["target_db"], token["expected_db"], self.unlock())[0], 200
+        )
+        self.level(-40)
+        self.assertEqual(self.volume(token["target_db"], token["expected_db"])[0], 409)
+
+    def test_unverified_model_is_refused(self):
+        with mock.patch.dict(toppingctl.CONFIRMED_WRITES, {"dx5ii": frozenset()}):
+            status, out = self.lower()
+        self.assertEqual((status, out["error"]), (403, "model_unverified"))
+        self.assertEqual(self.dac.opens, 0)
 
 
 class ReadOnlyHandleTest(unittest.TestCase):

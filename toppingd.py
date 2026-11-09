@@ -15,6 +15,8 @@ readNack in CONFIRMED_READS for the model.
                              device, checks expected_db against that read in
                              raw units (409 changed), applies the -10 dB rule,
                              and returns the frames, with an undo token
+    POST /v1/volume/lower    {}: "Lower to -30 dB" -- if the fresh read is louder
+                             than -30 dB, -30 dB with no expected_db (no 409)
     POST /v1/unlocks         {} -> {unlock_id, expires_at}: 60 s above -10 dB
     DELETE /v1/unlocks/{id}  discards an unlock
 
@@ -104,6 +106,8 @@ MODES = ("dry-run",)
 UNLOCK_SECS = 60
 UNLOCK_ID = re.compile(r"[A-Za-z0-9_-]{16,64}")
 VOLUME_KEYS = {"target_db", "expected_db", "unlock_id"}
+# "Lower to -30 dB" (design rule 5; prototype r2's LOWER_TO).
+LOWER_TO_DB = -30.0
 # The frames a volume write is: 71 02 and the commit.
 VOLUME_WRITES = frozenset([(REG_CTRL, SUB_VOLUME), (REG_CTRL, SUB_COMMIT)])
 # GetSettings record indexes (vendor_commands.SETTINGS_FIELDS).
@@ -653,6 +657,24 @@ class Agent:
         uid = body.get("unlock_id")
         if uid is not None and not (isinstance(uid, str) and UNLOCK_ID.fullmatch(uid)):
             raise BadRequest("unlock_id must be an id from POST /v1/unlocks")
+        return self._volume_op(target, expected, uid)
+
+    def lower(self, body):
+        """POST /v1/volume/lower {}: "Lower to -30 dB". "Always lower if
+        louder" (George, 2026-11-08, #40 Q8): re-read, and if the room is
+        louder than LOWER_TO_DB set it, with no expected_db and so no 409.
+        At or below LOWER_TO_DB already, nothing is planned. Never needs an
+        unlock: it is only ever quieter."""
+        if body != {}:
+            raise BadRequest("POST /v1/volume/lower takes {}")
+        status, obj = self._volume_op(LOWER_TO_DB, None, None)
+        if status == 200:
+            obj.setdefault("lowered", True)
+        return status, obj
+
+    def _volume_op(self, target, expected, uid):
+        """The model checks, then the read and the decision under one lock
+        and open. expected=None is Lower to -30 dB: no compare-and-set."""
         dac = identify(self.configured_device)
         key = dac.get("key") if dac["status"] == "found" else None
         if key is None:
@@ -682,7 +704,8 @@ class Agent:
 
     def _volume_decision(self, spec, key, rec, target, expected, uid):
         """The plan's rules, in its order: (a) compare-and-set on expected_db
-        in raw units, (b) the -10 dB rule before and after quantising."""
+        in raw units, (b) the -10 dB rule before and after quantising.
+        expected=None is Lower to -30 dB, which skips (a) by decision Q8."""
         if REC_VOLUME not in rec or REC_VOLUME_STEP not in rec:
             # The read worked (and is cached); it just can't anchor a write.
             return 503, {
@@ -692,6 +715,21 @@ class Agent:
         step = 1.0 if rec[REC_VOLUME_STEP] == 1 else 0.5
         before_raw = rec[REC_VOLUME]
         before = _level(before_raw, step)
+        if expected is None:
+            if volume_steps(target, step)[0] <= before_raw:
+                # Already at or below the target: lowering never raises it.
+                return 200, {
+                    "mode": self.mode,
+                    "sent": False,
+                    "lowered": False,
+                    "reason": f"the device reads {before['db']:+.1f} dB, not louder than "
+                    f"{target:+.1f} dB",
+                    "before": before,
+                    "frames": [],
+                    "loud_result": before["db"] > VOL_WARN_DB,
+                }
+            # Anchor on the read just taken, so (a) holds by construction.
+            expected = before["db"]
         expected_raw, expected_on_grid = volume_steps(expected, step)
         if expected_on_grid != expected or expected_raw != before_raw:
             # A 409 discards the unlock it carried, as Cancel does.
@@ -941,6 +979,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "/v1/room": {"GET": self._room},
                 "/v1/state": {"GET": self._state},
                 "/v1/volume": {"POST": lambda q, b: self.agent.volume(_json(b))},
+                "/v1/volume/lower": {"POST": lambda q, b: self.agent.lower(_json(b))},
                 "/v1/unlocks": {"POST": self._unlock},
             }.get(url.path)
         if methods is None:
