@@ -155,7 +155,9 @@ class AgentTestCase(unittest.TestCase):
         if self.synced[0]:
             # Synced an hour ago, so the floor (NtpFloorTest) stays out of the way.
             self.auth.floor = int(self.clock[0]) - 3600
-        self.agent = toppingd.Agent("office", self.configured, self.state_dir)
+        self.agent = toppingd.Agent(
+            "office", self.configured, self.state_dir, now=lambda: self.clock[0]
+        )
         self.server = toppingd.make_server(("127.0.0.1", 0), self.agent, self.auth)
         self.server.RequestHandlerClass.log_message = lambda *a: None
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -187,6 +189,13 @@ class AgentTestCase(unittest.TestCase):
         status, obj, headers, nonce, raw = self.call(path)
         self.assertTrue(toppingd.verify_response(KEY, nonce, status, headers, raw))
         return status, obj
+
+    def send(self, path, obj=None, method="POST"):
+        """A signed JSON request -> (status, body), its response checked."""
+        body = b"" if obj is None else json.dumps(obj).encode()
+        status, out, headers, nonce, raw = self.call(path, method=method, body=body)
+        self.assertTrue(toppingd.verify_response(KEY, nonce, status, headers, raw))
+        return status, out
 
     def readnacks(self):
         """(opcode, reg, sub) of every frame the fake DAC received."""
@@ -372,19 +381,28 @@ def toppingd_floor_reason():
 
 
 class RoutesTest(AgentTestCase):
-    """Read-only: two GET routes, nothing else, and no route writes a frame."""
+    """The routes this build has, and that none of them sends a write."""
 
     def setUp(self):
         super().setUp()
         self.start()
 
-    def test_no_write_route_and_no_write_method(self):
-        for method in ("POST", "PUT", "PATCH", "DELETE"):
-            for path in ("/v1/room", "/v1/state", "/v1/volume", "/v1/plans", "/v1/unlocks"):
-                with self.subTest(method=method, path=path):
-                    status, obj, headers, nonce, raw = self.call(path, method=method, body=b"{}")
-                    self.assertIn(status, (404, 405))
-                    self.assertTrue(toppingd.verify_response(KEY, nonce, status, headers, raw))
+    def test_unknown_routes_and_methods(self):
+        cases = [(m, "/v1/room") for m in ("POST", "PUT", "PATCH", "DELETE")]
+        cases += [(m, "/v1/state") for m in ("POST", "DELETE")]
+        cases += [(m, "/v1/volume") for m in ("GET", "PUT", "DELETE")]
+        cases += [
+            ("GET", "/v1/unlocks"),
+            ("DELETE", "/v1/unlocks"),
+            ("GET", "/v1/unlocks/" + "a" * 32),
+        ]
+        cases += [(m, "/v1/plans") for m in ("GET", "POST")]
+        cases += [("DELETE", "/v1/unlocks/short"), ("POST", "/v1/plans/x/send")]
+        for method, path in cases:
+            with self.subTest(method=method, path=path):
+                status, obj, headers, nonce, raw = self.call(path, method=method, body=b"{}")
+                self.assertIn(status, (404, 405))
+                self.assertTrue(toppingd.verify_response(KEY, nonce, status, headers, raw))
         self.assertEqual(self.dac.writes, [])
 
     def test_every_route_sends_only_confirmed_readnacks(self):
@@ -404,7 +422,7 @@ class Dx5StateTest(AgentTestCase):
         self.assertEqual(room["dac"]["key"], "dx5ii")
         self.assertEqual(room["dac"]["model_status"], "confirmed")
         self.assertEqual(room["read_path"], "get_settings")
-        self.assertEqual(room["capabilities"], {"writes": [], "reads": ["71 0c"]})
+        self.assertEqual(room["capabilities"], {"writes": ["volume"], "reads": ["71 0c"]})
         self.assertEqual(self.dac.writes, [], "identity must not send frames")
 
     def test_state_one_db(self):
@@ -697,6 +715,407 @@ class NoReadPathTest(AgentTestCase):
         self.check_no_io()
 
 
+def _vol_frame(raw):
+    return toppingctl.frame(0x71, 0x02, raw).hex(" ")
+
+
+class VolumeTestCase(AgentTestCase):
+    """A DX5 II on one_db (raw = -dB) unless a test sets volumeStep 0."""
+
+    def setUp(self):
+        super().setUp()
+        self.level(-30)
+
+    def level(self, db, step=1):
+        """Where the fake DAC's knob is: the next read returns it."""
+        self.dac.records = {0: 1, 9: int(round(-db / (1.0 if step == 1 else 0.5))), 32: step}
+
+    def volume(self, target, expected, unlock_id=None):
+        body = {"target_db": target, "expected_db": expected}
+        if unlock_id is not None:
+            body["unlock_id"] = unlock_id
+        return self.send("/v1/volume", body)
+
+    def unlock(self):
+        status, out = self.send("/v1/unlocks", {})
+        self.assertEqual(status, 200)
+        return out["unlock_id"]
+
+    def assert_no_write_sent(self):
+        """Dry-run: the DAC saw readNacks to GetSettings and nothing else."""
+        for opcode, reg, sub in self.readnacks():
+            self.assertEqual((opcode, reg, sub), (0x10, 0x71, 0x0C))
+
+
+class VolumeTest(VolumeTestCase):
+    def setUp(self):
+        super().setUp()
+        self.start()
+
+    def test_dry_run_returns_the_frames_and_sends_none(self):
+        status, out = self.volume(-25, -30)
+        self.assertEqual(status, 200)
+        self.assertEqual((out["mode"], out["sent"]), ("dry-run", False))
+        self.assertEqual(out["before"], {"db": -30.0, "raw": 30, "volume_step_db": 1.0})
+        self.assertEqual(out["after_predicted"], {"db": -25.0, "raw": 25, "volume_step_db": 1.0})
+        self.assertEqual(
+            [f["hex"] for f in out["frames"]],
+            [_vol_frame(25), toppingctl.frame(0x71, 0x34, 1).hex(" ")],
+        )
+        self.assertFalse(out["loud_result"])
+        self.assertEqual(out["undo"], {"target_db": -30.0, "expected_db": -25.0})
+        self.assertEqual(self.readnacks(), [(0x10, 0x71, 0x0C)])
+        self.assertEqual((self.dac.opens, self.dac.closes), (1, 1))
+
+    def test_half_db_step_reads_its_own_scale(self):
+        self.level(-30, step=0)
+        status, out = self.volume(-20.5, -30)
+        self.assertEqual(status, 200)
+        self.assertEqual(out["before"]["raw"], 60)
+        self.assertEqual(out["after_predicted"], {"db": -20.5, "raw": 41, "volume_step_db": 0.5})
+
+    def test_a_jump_of_any_size_is_one_write(self):
+        status, out = self.volume(-99, -30)
+        self.assertEqual(status, 200)
+        self.assertEqual(out["frames"][0]["hex"], _vol_frame(99))
+        self.level(-99)
+        status, out = self.volume(-11, -99)
+        self.assertEqual((status, out["after_predicted"]["raw"]), (200, 11))
+
+    def test_the_read_refreshes_the_state_cache(self):
+        self.level(-40)
+        self.volume(-41, -40)
+        st = self.get("/v1/state")[1]
+        self.assertEqual((st["cached"], st["fields"]["volume_db"]["value"]), (True, -40.0))
+
+    def test_changed_elsewhere_is_409_with_the_fresh_state(self):
+        # The knob moved to -60 since the UI read -30: the "+" must not jump.
+        self.level(-60)
+        status, out = self.volume(-29, -30)
+        self.assertEqual((status, out["error"]), (409, "changed"))
+        self.assertIn("reads -60.0 dB, not the -30.0 dB", out["reason"])
+        self.assertEqual(out["state"]["fields"]["volume_db"]["value"], -60.0)
+        self.assertNotIn("frames", out)
+        self.assertFalse(out["unlock_discarded"])
+        self.assert_no_write_sent()
+
+    def test_expected_is_compared_in_raw_units(self):
+        # -30.4 is within float noise of nothing, but it is not a level a
+        # one_db device reports, so it can't match raw 30.
+        for expected in (-30.4, -30.5, -29.9999):
+            with self.subTest(expected=expected):
+                self.assertEqual(self.volume(-31, expected)[0], 409)
+        self.assertEqual(self.volume(-31, -30.0)[0], 200)
+        self.level(-30, step=0)
+        self.assertEqual(self.volume(-31, -30.5)[0], 409)
+        self.level(-30.5, step=0)
+        self.assertEqual(self.volume(-31, -30.5)[0], 200)
+
+    def test_busy_agent_is_423_and_sends_nothing(self):
+        self.agent._hid.acquire()
+        self.addCleanup(self.agent._hid.release)
+        status, out = self.volume(-25, -30)
+        self.assertEqual((status, out["error"]), (423, "busy"))
+        self.assertEqual(self.dac.opens, 0)
+
+    def test_no_volume_step_in_the_read_is_read_failed(self):
+        self.dac.records = {9: 30}
+        status, out = self.volume(-25, -30)
+        self.assertEqual((status, out["error"]), (503, "read_failed"))
+        self.assertIn("volumeStep", out["reason"])
+        self.assert_no_write_sent()
+
+    def test_bad_requests_open_nothing(self):
+        cases = [
+            {"expected_db": -30},
+            {"target_db": -25},
+            {"target_db": True, "expected_db": -30},
+            {"target_db": "-25", "expected_db": -30},
+            {"target_db": 3, "expected_db": -30},
+            {"target_db": -25, "expected_db": -30, "unlock_id": 7},
+            {"target_db": -25, "expected_db": -30, "unlock_id": "../x"},
+            [],
+        ]
+        for body in cases:
+            with self.subTest(body=body):
+                status, out = self.send("/v1/volume", body)
+                self.assertEqual((status, out["error"]), (400, "bad_request"))
+        for raw in (b"not json", b'{"target_db": NaN, "expected_db": -30}'):
+            with self.subTest(raw=raw):
+                self.assertEqual(self.call("/v1/volume", method="POST", body=raw)[0], 400)
+        self.assertEqual(self.dac.opens, 0)
+
+    def test_anything_but_volume_points_at_plans(self):
+        status, out = self.send("/v1/volume", {"target_db": -25, "expected_db": -30, "gain": 1})
+        self.assertEqual(status, 400)
+        self.assertIn("/v1/plans", out["reason"])
+        self.assertEqual(self.dac.opens, 0)
+
+
+class VolumeModelTest(VolumeTestCase):
+    """Only a confirmed model with its volume frames in CONFIRMED_WRITES."""
+
+    def check_refused(self, error, http=403):
+        status, out = self.volume(-31, -30)
+        self.assertEqual((status, out["error"]), (http, error))
+        self.assertNotIn("frames", out)
+        self.assertEqual(self.dac.writes, [])
+        return out
+
+    def test_dx1ii_is_unverified(self):
+        self.products = ("DX1 II",)
+        self.start()
+        self.assertIn("unverified", self.check_refused("model_unverified")["reason"])
+        self.assertEqual(self.dac.opens, 0)
+
+    def test_d90iii_is_unverified(self):
+        self.products = ("D90 III Discrete",)
+        self.start()
+        self.check_refused("model_unverified")
+        self.assertEqual(self.dac.opens, 0)
+
+    def test_no_dac(self):
+        self.products = ()
+        self.start()
+        self.assertEqual(self.check_refused("unavailable", http=503)["status"], "no_dac")
+
+    def test_emptied_confirmed_writes_refuse(self):
+        with mock.patch.dict(toppingctl.CONFIRMED_WRITES, {"dx5ii": frozenset()}):
+            self.start()
+            self.check_refused("model_unverified")
+            self.assertEqual(self.get("/v1/room")[1]["capabilities"]["writes"], [])
+
+    def test_agent_write_gate(self):
+        frames = [toppingctl.Frame(toppingctl.frame(0x71, 0x35, 1), "SaveC1")]
+        with self.assertRaisesRegex(toppingctl.Refused, "NEVER"):
+            toppingd.check_agent_writes("dx5ii", frames)
+        for reg_sub in ((0x71, 0x11), (0x71, 0x04), (0x71, 0x05), (0x71, 0x03)):
+            f = [toppingctl.Frame(toppingctl.frame(*reg_sub, 1), "")]
+            with self.subTest(reg_sub=reg_sub), self.assertRaises(toppingctl.Refused):
+                toppingd.check_agent_writes("dx5ii", f)
+        readnack = [toppingctl.Frame(toppingctl.frame(0x71, 0x02, 1, opcode=0x10), "")]
+        with self.assertRaises(toppingctl.Refused):
+            toppingd.check_agent_writes("dx5ii", readnack)
+        toppingd.check_agent_writes("dx5ii", toppingctl.plan_volume(DX5, -30, 1.0, False))
+
+
+DX5 = toppingctl.DEVICES["dx5ii"]
+
+
+class LoudTest(VolumeTestCase):
+    """The -10 dB rule: quieter is always allowed; louder above -10 dB needs
+    a live unlock, checked before and after quantising."""
+
+    def setUp(self):
+        super().setUp()
+        self.start()
+
+    def test_louder_above_minus_10_needs_an_unlock(self):
+        status, out = self.volume(-5, -30)
+        self.assertEqual((status, out["error"]), (403, "unlock_required"))
+        self.assertIn("no unlock_id was sent", out["reason"])
+        uid = self.unlock()
+        status, out = self.volume(-5, -30, uid)
+        self.assertEqual(status, 200)
+        self.assertTrue(out["loud_result"])
+        self.assert_no_write_sent()
+
+    def test_quieter_above_minus_10_needs_none(self):
+        self.level(-3)
+        status, out = self.volume(-6, -3)
+        self.assertEqual(status, 200)
+        self.assertTrue(out["loud_result"])
+        self.assertEqual(self.volume(-3, -3)[0], 200)  # not louder: the same level
+
+    def test_lower_to_minus_30_needs_none(self):
+        self.level(0)
+        self.assertEqual(self.volume(-30, 0)[0], 200)
+
+    def test_at_minus_10_needs_none(self):
+        self.assertEqual(self.volume(-10, -30)[0], 200)
+
+    def test_requested_level_is_checked_before_quantising(self):
+        # -9.6 quantises to -10.0 on one_db, but -9.6 was asked for.
+        status, out = self.volume(-9.6, -30)
+        self.assertEqual((status, out["error"]), (403, "unlock_required"))
+
+    def test_quantised_level_is_checked_too(self):
+        # A quantiser that rounds one step louder: the after-quantising check
+        # is what stops -10.0 landing at -9.0.
+        def louder(db, step_db):
+            steps = int(round(-db / step_db)) - 1
+            return steps, -steps * step_db
+
+        with mock.patch.object(toppingctl, "volume_steps", louder):
+            status, out = self.volume(-10, -30)
+        self.assertEqual((status, out["error"]), (403, "unlock_required"))
+
+    def test_rounding_never_carries_an_accepted_level_above_minus_10(self):
+        for step in (1, 0):
+            rec = {9: 30 if step else 60, 32: step}
+            for hundredths in range(-1200, -999, 5):
+                target = hundredths / 100
+                with self.subTest(step=step, target=target):
+                    status, out = self.agent._volume_decision(DX5, "dx5ii", rec, target, -30, None)
+                    self.assertEqual(status, 200)
+                    self.assertLessEqual(out["after_predicted"]["db"], -10.0)
+            for target in (-9.99, -9.75, -9.5, -9.25, -9.0):
+                with self.subTest(step=step, target=target):
+                    status, _ = self.agent._volume_decision(DX5, "dx5ii", rec, target, -30, None)
+                    self.assertEqual(status, 403)
+
+
+class UnlockTest(VolumeTestCase):
+    """POST/DELETE /v1/unlocks: 60 s, not consumed by writes, ended by the
+    cap, DELETE (Cancel, leaving, signing out, unticking) or a 409."""
+
+    def setUp(self):
+        super().setUp()
+        self.start()
+
+    def test_create_sends_nothing(self):
+        status, out = self.send("/v1/unlocks", {})
+        self.assertEqual(status, 200)
+        self.assertEqual(out["expires_in_s"], 60)
+        self.assertEqual(out["expires_at"], toppingd._iso(self.clock[0] + 60))
+        self.assertRegex(out["unlock_id"], toppingd.UNLOCK_ID)
+        self.assertEqual(self.send("/v1/unlocks")[0], 200)  # an empty body is {}
+        self.assertEqual(self.send("/v1/unlocks", {"secs": 600})[0], 400)
+        self.assertEqual((self.dac.writes, self.dac.opens), ([], 0))
+
+    def test_expires_at_60_s(self):
+        uid = self.unlock()
+        self.clock[0] += 59.9
+        self.assertEqual(self.volume(-5, -30, uid)[0], 200)
+        self.clock[0] += 0.1
+        status, out = self.volume(-5, -30, uid)
+        self.assertEqual((status, out["error"]), (403, "unlock_required"))
+        self.assertIn("expired", out["reason"])
+
+    def test_checked_when_the_write_runs(self):
+        # The UI queued the write inside the cap; it runs after.
+        uid = self.unlock()
+        self.clock[0] += 61
+        self.assertEqual(self.volume(-5, -30, uid)[0], 403)
+
+    def test_cancelled_unlock_is_refused(self):
+        uid = self.unlock()
+        status, out = self.send(f"/v1/unlocks/{uid}", method="DELETE")
+        self.assertEqual((status, out["discarded"]), (200, True))
+        status, out = self.volume(-5, -30, uid)
+        self.assertEqual((status, out["error"]), (403, "unlock_required"))
+        self.assertIn("cancelled", out["reason"])
+        # Discarding again, as leaving after Cancel would, is not an error.
+        status, out = self.send(f"/v1/unlocks/{uid}", method="DELETE")
+        self.assertEqual((status, out["discarded"]), (200, False))
+
+    def test_unknown_unlock_is_refused(self):
+        self.assertEqual(self.volume(-5, -30, "x" * 32)[0], 403)
+
+    def test_a_409_discards_the_unlock(self):
+        uid = self.unlock()
+        self.level(-20)  # changed elsewhere
+        status, out = self.volume(-5, -30, uid)
+        self.assertEqual((status, out["unlock_discarded"]), (409, True))
+        status, out = self.volume(-5, -20, uid)
+        self.assertEqual((status, out["error"]), (403, "unlock_required"))
+
+    def test_paused_drag(self):
+        uid = self.unlock()
+        # A drag up past -10 dB: each write lands, and the next starts from it.
+        for t, target, expected in ((1, -9, -30), (2, -7, -9)):
+            self.clock[0] += t
+            self.assertEqual(self.volume(target, expected, uid)[0], 200)
+            self.level(target)
+        # The volume settles; a pause of 40 s doesn't relock the unlock.
+        self.clock[0] += 40
+        self.assertEqual(self.volume(-5, -7, uid)[0], 200)
+        self.level(-5)
+        # One write queued behind another: both run under the same unlock.
+        self.clock[0] += 10
+        results = []
+        threads = [
+            threading.Thread(target=lambda: results.append(self.volume(-4, -5, uid)[0]))
+            for _ in range(2)
+        ]
+        # The second waits for the first under the agent's own lock.
+        with mock.patch.object(toppingd, "AGENT_LOCK_WAIT", 2.0):
+            for th in threads:
+                th.start()
+            for th in threads:
+                th.join()
+        self.assertEqual(results, [200, 200])
+        # The first write after the cap is refused.
+        self.clock[0] += 7  # 60 s since the unlock
+        self.assertEqual(self.volume(-4, -5, uid)[0], 403)
+        self.assert_no_write_sent()
+
+    def test_unlocks_are_independent(self):
+        a, b = self.unlock(), self.unlock()
+        self.send(f"/v1/unlocks/{a}", method="DELETE")
+        self.assertEqual(self.volume(-5, -30, b)[0], 200)
+
+
+class UndoTest(VolumeTestCase):
+    """Undo is a volume write to the level read before the burst, with
+    expected_db the level the burst set."""
+
+    def setUp(self):
+        super().setUp()
+        self.start()
+
+    def undo(self, token, unlock_id=None):
+        return self.volume(token["target_db"], token["expected_db"], unlock_id)
+
+    def test_undo_token_round_trip(self):
+        status, out = self.volume(-25, -30)
+        self.level(-25)  # the write landed
+        status, out = self.undo(out["undo"])
+        self.assertEqual(status, 200)
+        self.assertEqual(out["frames"][0]["hex"], _vol_frame(30))
+
+    def test_undo_returns_to_before_the_whole_burst(self):
+        first = self.volume(-28, -30)[1]
+        self.level(-28)
+        last = self.volume(-25, -28)[1]
+        self.level(-25)
+        burst = {
+            "target_db": first["undo"]["target_db"],
+            "expected_db": last["undo"]["expected_db"],
+        }
+        self.assertEqual(burst, {"target_db": -30.0, "expected_db": -25.0})
+        status, out = self.undo(burst)
+        self.assertEqual((status, out["after_predicted"]["db"]), (200, -30.0))
+        # The first write's own token no longer matches the device.
+        self.assertEqual(self.undo(first["undo"])[0], 409)
+
+    def test_undo_after_a_change_elsewhere_is_409(self):
+        out = self.volume(-25, -30)[1]
+        self.level(-40)  # the knob moved after the write landed
+        status, out = self.undo(out["undo"])
+        self.assertEqual((status, out["error"]), (409, "changed"))
+
+    def test_undo_that_raises_above_minus_10_needs_an_unlock(self):
+        self.level(-5)
+        out = self.volume(-20, -5)[1]  # lowering: no unlock needed
+        self.level(-20)
+        status, refused = self.undo(out["undo"])
+        self.assertEqual((status, refused["error"]), (403, "unlock_required"))
+        self.assertEqual(self.undo(out["undo"], self.unlock())[0], 200)
+
+    def test_undo_that_lowers_above_minus_10_needs_none(self):
+        # An interpretation in the plan, not George's decision (flagged in
+        # the PR): quieter is always allowed, even when it lands above -10.
+        self.level(-6)
+        out = self.volume(-3, -6, self.unlock())[1]
+        self.level(-3)
+        status, out = self.undo(out["undo"])
+        self.assertEqual(status, 200)
+        self.assertEqual(out["after_predicted"]["db"], -6.0)
+        self.assertTrue(out["loud_result"])
+        self.assert_no_write_sent()
+
+
 class ReadOnlyHandleTest(unittest.TestCase):
     """The agent's send path, with frames built by hand: anything but a
     confirmed readNack is refused before it reaches the handle."""
@@ -784,7 +1203,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg["key"], KEY)
 
     def test_live_is_refused(self):
-        self.refused("key_file: KEY\nmode: live\n", "read-only")
+        self.refused("key_file: KEY\nmode: live\n", "only runs dry-run")
         with self.assertRaises(ValueError):
             toppingd.Agent("office", mode="live")
 
