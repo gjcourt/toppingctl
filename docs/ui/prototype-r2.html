@@ -166,7 +166,7 @@ const PRESETS = [
 // unrecognised DAC, doesn't get it.
 const HEADPHONE_OUT = {
   "Topping DX5 II": "headphone gain register 71 17 is confirmed in the protocol spec",
-  "Topping DX1 II": "toppingctl.py's DX1 II notes record a front-panel high-gain setting",
+  "Topping DX1 II": "George confirmed it has a headphone jack (TOPPINGCTL-14, 2026-11-08)",
 };
 const hasHeadphones = (r) => Object.hasOwn(HEADPHONE_OUT, r.model);
 
