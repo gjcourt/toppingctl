@@ -19,6 +19,13 @@
   unticking, or on leaving the room. Gain, presets and power keep the preview
   bar; high gain needs the same unlock (decision 8). Scene recall is absent
   (Q15).
+
+  George's answers to the #40 questions (TOPPINGCTL-12, 2026-11-08), applied by
+  TOPPINGCTL-14: the room page opens on DAC volume, with headphone gain, power
+  and EQ preset behind a More disclosure (Q5). The one 60 s unlock names both
+  things it permits (Q6). "Lower to -30 dB" re-reads and lowers whenever the
+  room is louder than -30 dB, and is never refused as Changed elsewhere (Q8).
+  Headphone gain shows only for models known to have a headphone output (Q9).
 -->
 <style>
   :root {
@@ -115,6 +122,8 @@
   .pending .acts { display: grid; grid-template-columns: 1fr 2fr; gap: 10px; margin-top: 10px; }
   details { font-size: 13px; color: var(--muted); }
   pre { white-space: pre-wrap; font: 12px/1.5 ui-monospace, Menlo, monospace; margin: 6px 0 0; }
+  button.more { display: block; width: 100%; text-align: left; margin: 22px 0 0; padding: 12px 14px; }
+  .more-name { display: block; font-weight: 650; }
   .proto { margin-top: 36px; border: 1px dashed var(--line); border-radius: var(--radius); padding: 12px; font-size: 14px; color: var(--muted); }
   [hidden] { display: none !important; }
 </style>
@@ -135,10 +144,12 @@ const SAFE_MAX = -10;      // AGENTS.md: above -10 dB needs an explicit force
 const VOL_MIN = -99;
 const LOWER_TO = -30;      // the one-tap "Lower to -30 dB" (design rule 5, Q13)
 const DEBOUNCE_MS = 300;   // quiet time before the latest volume target is sent
-const UNLOCK_S = 60;       // the "Allow above −10 dB" checkbox times out
+const UNLOCK_S = 60;       // the unlock checkbox times out
 const BUSY_MS = 8000;      // how long the sample CLI holds the Office lock
-const UNLOCK_LABEL = "Allow above " + MINUS + "10 dB for 60 s";
-const LOUD_MSG = "Above " + MINUS + "10 dB needs “Allow above " + MINUS + "10 dB” first.";
+// Q6: one unlock, worded so it names both things it permits, wherever it appears.
+const UNLOCK_NAME = "Allow high gain or above " + MINUS + "10 dB";
+const UNLOCK_LABEL = UNLOCK_NAME + " for 60 s";
+const LOUD_MSG = "Above " + MINUS + "10 dB needs “" + UNLOCK_NAME + "” first.";
 const DAC_VOL_DEF = "The DAC's own volume. Snapcast and Home Assistant set a second level in series that this page doesn't show, so this isn't the level at your ears.";
 
 // Real preset files from presets/ (names from presets/README.md). Which one a
@@ -149,6 +160,15 @@ const PRESETS = [
   { id: "sundara-post2020pads-oratory-harman-oe", name: "HiFiMan Sundara · Harman OE", detail: "10 filters, preamp " + MINUS + "6.7 dB", pre: -6.7 },
   { id: "zero-red-crinacle-harman-ie", name: "Truthear Zero:RED · Harman IE", detail: "10 filters, preamp " + MINUS + "3.3 dB", pre: -3.3 },
 ];
+
+// Q9: models known to have a headphone output, and what that rests on. The
+// headphone gain section shows only for these; any other model, or an
+// unrecognised DAC, doesn't get it.
+const HEADPHONE_OUT = {
+  "Topping DX5 II": "headphone gain register 71 17 is confirmed in the protocol spec",
+  "Topping DX1 II": "toppingctl.py's DX1 II notes record a front-panel high-gain setting",
+};
+const hasHeadphones = (r) => Object.hasOwn(HEADPHONE_OUT, r.model);
 
 const VIEW_ONLY = "View only: this model isn't confirmed for toppingctl.";
 
@@ -219,7 +239,7 @@ function sampleRooms() {
 }
 
 let S;
-function newRoomUi() { return { want: null, wantUnlock: null, flight: null, timer: null, msg: null, undoTo: null, burstBase: null, err: "", reading: false }; }
+function newRoomUi() { return { want: null, wantUnlock: null, wantLower: false, flight: null, timer: null, msg: null, undoTo: null, burstBase: null, err: "", reading: false }; }
 function reset() {
   if (S) {
     S.rooms.forEach((r) => clearTimeout(r.ui.timer));
@@ -227,7 +247,7 @@ function reset() {
   }
   S = { view: "signin", room: null, rooms: sampleRooms(), pending: null, sending: false,
         unlock: false, unlockSeq: 0, unlockLeft: 0, unlockTimer: null, unlockNote: "",
-        failNext: false, readFailNext: false, typed: "", typedErr: "", framesOpen: false, said: null, toast: null };
+        more: false, failNext: false, readFailNext: false, typed: "", typedErr: "", framesOpen: false, said: null, toast: null };
   S.rooms.forEach((r) => { r.ui = newRoomUi(); });
 }
 reset();
@@ -353,7 +373,9 @@ function viewRoom() {
   } else if (r.status !== "confirmed") {
     banner = `<div class="banner info"><strong>View only.</strong> The ${esc(r.model)} isn't confirmed for toppingctl, so this page can't change anything on it.</div>`;
   } else if (asleep(r)) {
-    banner = `<div class="banner info" role="status"><strong>Asleep</strong>, as last sent from this page. What the DAC reports while asleep hasn't been measured yet, so the values below are from before it slept. Wake it to change anything.</div>`;
+    // Wake lives under More with power, so the banner offers it too: asleep, it's the only change there is.
+    banner = `<div class="banner info" role="status"><strong>Asleep</strong>, as last sent from this page. What the DAC reports while asleep hasn't been measured yet, so the values below are from before it slept. Wake it to change anything.
+      <br><button data-act="power" data-to="wake" id="wake-banner">Wake ${esc(r.name)} (shows a preview)</button></div>`;
   }
   const identity = r.product ? `${esc(r.product)} · ${esc(r.host)}` : `${esc(r.model)} · ${esc(r.host)}`;
   if (r.state === "nodac") {
@@ -371,12 +393,29 @@ function viewRoom() {
   ${S.toast && S.toast.room === r.id ? `<div class="banner ${S.toast.kind}" id="toast">${S.toast.html}</div>` : ""}
   <h2>DAC volume</h2>
   <div class="card ${r.state === "down" || r.state === "busy" ? "stale" : ""}" id="volcard">${volumeCard(r)}</div>
-  <h2>Headphone gain</h2>
-  <div class="card">${gainBlock(r)}</div>
-  <h2>Power</h2>
-  <div class="card">${powerBlock(r)}</div>
-  <h2>EQ preset</h2>
-  <div class="card">${presetBlock(r)}</div>`;
+  ${moreBlock(r)}`;
+}
+
+// Q5: volume on top, the rest one level down. The closed button names what's
+// inside and its current values, so nothing has to be opened just to see it.
+function moreBlock(r) {
+  const names = (hasHeadphones(r) ? ["headphone gain"] : []).concat(["power", "EQ preset"]);
+  const now = (hasHeadphones(r) ? [r.gain.v === null ? "gain unknown" : r.gain.v + " gain"] : [])
+    .concat([r.power.v === null ? "power unknown" : r.power.v,
+      r.preset.v ? presetName(r.preset.v) + " (last written)" : "EQ preset unknown"]);
+  const label = "More: " + names.join(", ");
+  let html = `<button class="more" id="more" data-act="more" aria-expanded="${S.more}" aria-controls="more-body">
+      <span class="more-name">${S.more ? "▾" : "▸"} ${esc(label)}</span>
+      <span class="sub">${esc(now.join(" · "))}</span></button>`;
+  if (!S.more) return html;
+  html += `<div id="more-body">`;
+  if (hasHeadphones(r)) html += `<h2>Headphone gain</h2><div class="card">${gainBlock(r)}</div>`;
+  html += `<h2>Power</h2><div class="card">${powerBlock(r)}</div>
+    <h2>EQ preset</h2><div class="card">${presetBlock(r)}</div>`;
+  if (!hasHeadphones(r)) {
+    html += `<div class="why">No headphone gain here: ${esc(r.model === "Unrecognised" ? "this DAC isn't in toppingctl's model list" : "toppingctl doesn't know of a headphone output on the " + r.model)}.</div>`;
+  }
+  return html + `</div>`;
 }
 
 // --- volume: send without a preview, debounced ------------------------------
@@ -407,6 +446,7 @@ function request(r, raw) {
     : loudError(base, raw, S.unlock) || loudError(base, to, S.unlock)) || "";
   if (r.ui.err) { if (r.ui.err !== prevErr) say(r.ui.err); refreshVolume(); return; }
   if (r.ui.flight === null && r.ui.want === null) r.ui.burstBase = base;
+  r.ui.wantLower = false;            // input after "Lower to -30 dB" replaces it
   if (to === base && r.ui.flight === null) {
     clearTimeout(r.ui.timer); r.ui.timer = null; r.ui.want = null;
     r.ui.msg = { kind: "none" };
@@ -425,8 +465,8 @@ function request(r, raw) {
 function flush(r) {
   r.ui.timer = null;
   if (r.ui.flight !== null || r.ui.want === null) return;
-  const to = r.ui.want, expected = r.vol.v, unlock = r.ui.wantUnlock;
-  r.ui.want = null;
+  const to = r.ui.want, expected = r.vol.v, unlock = r.ui.wantUnlock, lower = r.ui.wantLower;
+  r.ui.want = null; r.ui.wantLower = false;
   r.ui.flight = to;
   r.ui.msg = { kind: "sending" };
   refreshVolume();
@@ -441,7 +481,12 @@ function flush(r) {
       return settle(r, { kind: "refused", text: `${r.name} can't take a volume change now: ${r.state !== "ok" ? stateLine(r) : "it's asleep."}` });
     }
     const fresh = r.dev, readAt = clock();
-    if (fresh !== expected) {
+    // Q8: Lower doesn't compare with the expected level. It lowers whenever the
+    // fresh read is louder than -30 dB, and sends nothing when it isn't.
+    if (lower && fresh <= LOWER_TO) {
+      return settle(r, { kind: "quiet", fresh, readAt });
+    }
+    if (!lower && fresh !== expected) {
       return settle(r, { kind: "refused", fresh, readAt,
         text: `Changed elsewhere: ${r.name} reads ${db(fresh)}, not the ${db(expected)} this change started from. The level above is that fresh read; set the level again from there.` });
     }
@@ -453,7 +498,7 @@ function flush(r) {
         return settle(r, { kind: "failed", fresh, readAt, error: "no answer from " + r.host + " within 10 s" });
       }
       r.dev = to;
-      settle(r, { kind: "set", v: r.dev });
+      settle(r, { kind: "set", v: r.dev, lowered: lower ? { from: fresh, moved: fresh !== expected } : null });
     }, 800);
   }, 900);
 }
@@ -462,14 +507,17 @@ function settle(r, res) {
   r.ui.flight = null;
   if (res.kind === "set") {
     r.vol = { v: res.v, src: "read", age: "just now" };
-    r.ui.msg = { kind: "set" };
-    if (r.ui.want === r.vol.v) r.ui.want = null;                     // queued input already matches the device
+    r.ui.msg = { kind: "set", lowered: res.lowered };
+    if (res.lowered) r.ui.burstBase = res.lowered.from;   // undo goes back to the level it actually lowered from
+    if (r.ui.want === r.vol.v) { r.ui.want = null; r.ui.wantLower = false; }   // queued input already matches the device
     if (r.ui.want !== null) { flush(r); refreshVolume(); return; }   // input that arrived during the write goes next
     r.ui.undoTo = r.ui.burstBase !== r.vol.v ? r.ui.burstBase : null;
   } else {
     if (res.fresh !== undefined) r.vol = { v: res.fresh, src: "read", age: "at " + res.readAt };  // a busy refusal read nothing
     r.ui.msg = res;
+    if (r.ui.wantLower) { flush(r); return; }   // a queued Lower still goes: it doesn't depend on the old value
     r.ui.want = null;               // input typed against the old value is dropped
+    r.ui.wantLower = false;
     clearTimeout(r.ui.timer); r.ui.timer = null;
   }
   refreshVolume();
@@ -479,7 +527,7 @@ function settle(r, res) {
 function cancelVol(r) {
   if (r.ui.want === null) return;
   const inFlight = r.ui.flight !== null;
-  clearTimeout(r.ui.timer); r.ui.timer = null; r.ui.want = null;
+  clearTimeout(r.ui.timer); r.ui.timer = null; r.ui.want = null; r.ui.wantLower = false;
   r.ui.msg = { kind: "cancelled" };
   relock();
   refreshVolume();
@@ -504,10 +552,18 @@ function relock() {
 }
 
 // "Lower to -30 dB" goes at once: no unlock (it's quieter) and no quiet time.
-// The button goes away once the write starts, so focus moves to the level it changes.
+// It isn't checked against the level on screen: the agent re-reads and lowers
+// whenever the room is louder than -30 dB (Q8). Behind a write in flight, it
+// goes next. The button goes away once the write starts, so focus moves to the
+// level it changes.
 function lowerNow(r) {
-  request(r, LOWER_TO);
-  if (r.ui.want !== null && r.ui.flight === null) { clearTimeout(r.ui.timer); flush(r); }
+  if (!canVol(r)) return;
+  clearTimeout(r.ui.timer); r.ui.timer = null;
+  if (r.ui.flight === null && r.ui.want === null) r.ui.burstBase = r.vol.v;
+  r.ui.err = ""; r.ui.undoTo = null;
+  r.ui.want = LOWER_TO; r.ui.wantLower = true; r.ui.wantUnlock = null;
+  r.ui.msg = { kind: "waiting" };
+  if (r.ui.flight === null) flush(r); else refreshVolume();
   if (S.toast && S.toast.room === r.id && S.toast.loud) { S.toast = null; render("#vol-now"); }
   else $("#vol-now").focus();
 }
@@ -571,12 +627,16 @@ function statusHtml(r) {
   }
   if (u.flight === null && u.want === null) {
     if (m.kind === "set") {
+      const lw = m.lowered;
       lines.push(`<div class="st set">Set to ${esc(db(r.vol.v))}, read back from the device.` +
+        (lw && lw.moved ? ` It had changed elsewhere to ${esc(db(lw.from))} since the last read; Lower used that fresh read.` : "") +
         (u.undoTo !== null ? ` <button class="link" data-act="undo">Undo (back to ${esc(db(u.undoTo))})</button>` : "") + `</div>`);
     } else if (m.kind === "refused") {
       lines.push(`<div class="st refused">Not sent. ${esc(m.text)}</div>`);
     } else if (m.kind === "failed") {
       lines.push(`<div class="st failed">Failed: ${esc(m.error)}. ${esc(r.name)} reads ${esc(db(r.vol.v))} (read at ${esc(m.readAt)}, before the write). Check it before trying again.</div>`);
+    } else if (m.kind === "quiet") {
+      lines.push(`<div class="st">Nothing sent. ${esc(r.name)} reads ${esc(db(r.vol.v))} (read at ${esc(m.readAt)}), already at or below ${MINUS}30 dB.</div>`);
     } else if (m.kind === "cancelled") {
       lines.push(`<div class="st">Cancelled. Nothing was sent.</div>`);
     }
@@ -612,11 +672,12 @@ function refreshVolume() {
   const wokeLoud = S.toast && S.toast.room === r.id && S.toast.loud;   // the wake message already offers it
   const loud = r.vol.v > SAFE_MAX && r.ui.flight === null && r.ui.want === null && !wokeLoud;
   $("#vol-loud").innerHTML = loud
-    ? `<div class="banner warn">${esc(r.name)} reads ${esc(db(r.vol.v))}, above ${MINUS}10 dB. <br><button class="primary" data-act="lower">Lower to ${MINUS}30 dB now</button></div>`
+    ? `<div class="banner warn">${esc(r.name)} reads ${esc(db(r.vol.v))}, above ${MINUS}10 dB. <br><button class="primary" data-act="lower">Lower to ${MINUS}30 dB now</button>
+        <div class="why">It reads the DAC again first and lowers it if it's louder than ${MINUS}30 dB, even if the level has moved since.</div></div>`
     : "";
   $("#unlock").checked = S.unlock;
   $("#unlock-note").textContent = S.unlock
-    ? `Allowed above ${MINUS}10 dB for ${S.unlockLeft} more s. It locks at the cap, on Cancel, when you untick it, leave the room or sign out.`
+    ? `High gain and levels above ${MINUS}10 dB are allowed for ${S.unlockLeft} more s. It locks at the cap, on Cancel, when you untick it, leave the room or sign out.`
     : S.unlockNote;
   $("#tgt-err").textContent = S.typedErr;
 }
@@ -738,7 +799,7 @@ function presetNeedsUnlock(r, to, level) {
   const rise = to.pre - r.preamp.v;
   return rise > 0 && (level === null || level + rise > SAFE_MAX);
 }
-// Does the staged change need "Allow above -10 dB"? High gain always does (decision 8).
+// Does the staged change need the unlock? High gain always does (decision 8).
 function pendingIsLoud(r, p) {
   if (p.kind === "gain") return p.to === "High";
   if (p.kind === "preset") return presetNeedsUnlock(r, PRESETS.find((x) => x.id === p.to), r.vol.v);
@@ -763,7 +824,7 @@ function renderPending() {
     <div class="tag">${S.sending ? "Sending…" : "Preview · nothing sent yet"}</div>
     <div class="what num">${esc(p.what)}</div>
     ${p.note ? `<div class="banner warn">${esc(p.note)}</div>` : ""}
-    ${blocked ? `<div class="banner warn">Needs “Allow above ${MINUS}10 dB” first: ${loudReason(r, p)}.</div>` : ""}
+    ${blocked ? `<div class="banner warn">Needs “${UNLOCK_NAME}” first: ${loudReason(r, p)}.</div>` : ""}
     ${loud ? `<label class="check"><input type="checkbox" id="unlock-bar" ${S.unlock ? "checked" : ""} ${S.sending ? "disabled" : ""}>
       <span>${UNLOCK_LABEL}${r.output.hp ? " <strong>(output is headphones)</strong>" : ""}</span></label><div id="unlock-bar-note" class="why">${S.unlock ? `${S.unlockLeft} s left. The same checkbox as in DAC volume.` : ""}</div>` : ""}
     <details id="frames" ${S.framesOpen ? "open" : ""}><summary>Frames to send</summary><pre>${esc(p.frames)}</pre></details>
@@ -804,7 +865,7 @@ function sendPending() {
   }
   const loud = pendingIsLoud(r, p);
   if (loud && !S.unlock) {
-    S.toast = { room: r.id, kind: "bad", html: `<strong>Not sent.</strong> ${esc(r.name)}: ${loudReason(r, p)}. Tick “Allow above ${MINUS}10 dB”, then send again.` };
+    S.toast = { room: r.id, kind: "bad", html: `<strong>Not sent.</strong> ${esc(r.name)}: ${loudReason(r, p)}. Tick “${UNLOCK_NAME}”, then send again.` };
     render(); say(plain(S.toast.html)); return;
   }
   const gen = S;
@@ -906,7 +967,7 @@ function undoVol(r) {
   const to = r.ui.undoTo;
   if (to === null) return;
   if (to > SAFE_MAX && to > r.vol.v && !S.unlock) {
-    r.ui.err = `Going back to ${db(to)} is louder than ${MINUS}10 dB. Tick “Allow above ${MINUS}10 dB” and undo again.`;
+    r.ui.err = `Going back to ${db(to)} is louder than ${MINUS}10 dB. Tick “${UNLOCK_NAME}” and undo again.`;
     refreshVolume();
     return;
   }
@@ -914,7 +975,7 @@ function undoVol(r) {
 }
 
 function openRoom(id) {
-  S.room = id; S.view = "room";
+  S.room = id; S.view = "room"; S.more = false;   // Q5: every room opens on DAC volume
   S.pending = null; S.toast = null; S.typed = ""; S.typedErr = "";
 }
 
@@ -952,6 +1013,7 @@ function onAct(act, el) {
     case "signout": leaveRoom(r); S.view = "signin"; break;
     case "open": openRoom(el.dataset.id); break;
     case "back": leaveRoom(r); break;
+    case "more": S.more = !S.more; break;
     case "read": return readVol(r);
     case "step": request(r, displayed(r) + Number(el.dataset.dir) * stepOf(r)); return;
     case "typed": return typedSet(r);

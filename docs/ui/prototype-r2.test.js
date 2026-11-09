@@ -162,7 +162,7 @@ test("a write checked after the 60 s cap is refused, and so is a later louder ch
   assert.equal(h.room().dev, -32);
   assert.equal(h.room().ui.msg.kind, "refused");
   h.drag(-4.5);
-  assert.match(h.room().ui.err, /Allow above/);
+  assert.match(h.room().ui.err, /Allow high gain or above −10 dB/);
 });
 
 test("Cancel during a write says the write may still land", () => {
@@ -341,6 +341,7 @@ test("asleep: volume and gain are disabled, wake is previewed and reads the leve
   h.t.advance(800);
   assert.equal(h.room().power.v, "Asleep");
   assert.equal(h.room().power.src, "written", "an asleep read is unmeasured, so it's shown as written");
+  act(h, "more");
   assert.doesNotMatch(app(h), /data-act="(step|gain)"/);
   assert.match(app(h), /Wake Office to change this/);
   assert.match(app(h), /Undo \(preview: wake\)/);
@@ -372,6 +373,7 @@ test("a failed read shows values as unknown and disables changes until a read wo
   assert.equal(h.room().state, "readfail");
   assert.equal(h.room().vol.v, null);
   assert.match(app(h), /Read failed/);
+  act(h, "more");
   assert.doesNotMatch(app(h), /data-act="(step|gain|power)"/);
   act(h, "read");
   h.t.advance(900);
@@ -474,5 +476,124 @@ test("the output shows where it came from, like every other value", () => {
   assert.match(app(h), /Headphones, balanced \(read 12 s ago\)/);
   assert.match(app(h), /Line out, single-ended \(read 14 min ago, last known\)/);
   act(h, "open", { id: "office" });
+  act(h, "more");
   assert.match(app(h), /output: Headphones, balanced \(read 12 s ago\)/);
+});
+
+// --- TOPPINGCTL-14: George's answers to the #40 questions --------------------
+
+test("Q5: the room page opens on DAC volume, with gain, power and EQ preset behind More", () => {
+  const h = open();
+  assert.match(app(h), /<h2>DAC volume<\/h2>/);
+  assert.doesNotMatch(app(h), /<h2>(Headphone gain|Power|EQ preset)<\/h2>/);
+  assert.match(app(h), /data-act="more" aria-expanded="false"/);
+  assert.match(app(h), /More: headphone gain, power, EQ preset/);
+  assert.match(app(h), /Low gain · Awake · Dan Clark Audio E3 · Harman OE \(last written\)/, "closed, More still shows the values");
+  act(h, "more");
+  assert.match(app(h), /aria-expanded="true"/);
+  assert.match(app(h), /<h2>Headphone gain<\/h2>[\s\S]*<h2>Power<\/h2>[\s\S]*<h2>EQ preset<\/h2>/);
+  act(h, "gain", { to: "High" });
+  assert.match(app(h), /<h2>Headphone gain<\/h2>/, "a preview keeps More open");
+  act(h, "cancel");
+  act(h, "back");
+  act(h, "open", { id: "office" });
+  assert.match(app(h), /aria-expanded="false"/, "every room opens on DAC volume again");
+});
+
+test("Q5: asleep, Wake is offered in the banner without opening More", () => {
+  const h = open();
+  act(h, "more");
+  act(h, "power", { to: "sleep" });
+  h.run("sendPending()");
+  h.t.advance(800);
+  act(h, "back");
+  act(h, "open", { id: "office" });
+  assert.match(app(h), /id="wake-banner"/);
+  assert.doesNotMatch(app(h), /<h2>Power<\/h2>/);
+  act(h, "power", { to: "wake" });
+  assert.match(bar(h), /Wake Office/);
+});
+
+test("Q6: one unlock, with the same label naming high gain and above -10 dB in both places", () => {
+  const h = open();
+  const label = "Allow high gain or above −10 dB for 60 s";
+  assert.match(h.run("volumeCard(room())"), new RegExp(label));
+  act(h, "more");
+  act(h, "gain", { to: "High" });
+  assert.match(bar(h), new RegExp(label));
+  assert.match(bar(h), /Needs “Allow high gain or above −10 dB” first: high gain counts as loud/);
+  assert.doesNotMatch(h.run("volumeCard(room())") + bar(h), /Allow above/);
+  h.unlock(true);                           // ticked in DAC volume: the bar's copy is the same unlock
+  assert.doesNotMatch(bar(h), /data-act="send" disabled/);
+  assert.match(h.doc.els.get("#unlock-note").textContent, /High gain and levels above −10 dB are allowed/);
+});
+
+test("Q8: Lower re-reads and lowers when the room changed elsewhere, instead of refusing", () => {
+  const h = open();
+  h.run(`room().dev = -6; room().vol = { v: -6, src: "read", age: "x" }; refreshVolume();`);
+  h.run("room().dev = -3");                 // turned up again with the remote since that read
+  act(h, "lower");
+  h.t.advance(1700);
+  assert.equal(h.room().dev, -30);
+  assert.equal(h.room().vol.v, -30);
+  assert.equal(h.room().ui.msg.kind, "set");
+  assert.match(h.doc.els.get("#vol-status").innerHTML, /changed elsewhere to −3\.0 dB since the last read/);
+  assert.equal(h.room().ui.undoTo, -3, "undo names the level it really lowered from");
+});
+
+test("Q8: Lower sends nothing when the fresh read is already at or below -30 dB", () => {
+  const h = open();
+  h.run(`room().dev = -6; room().vol = { v: -6, src: "read", age: "x" }; refreshVolume();`);
+  h.run("room().dev = -35");                // turned down at the front panel since that read
+  act(h, "lower");
+  h.t.advance(1700);
+  assert.equal(h.room().dev, -35);
+  assert.equal(h.room().vol.v, -35);
+  assert.equal(h.room().ui.msg.kind, "quiet");
+  assert.match(h.doc.els.get("#vol-status").innerHTML, /Nothing sent\. Office reads −35\.0 dB/);
+});
+
+test("Q8: a Lower queued behind a refused write still goes", () => {
+  const h = open();
+  h.unlock(true);
+  h.run(`room().dev = -6; room().vol = { v: -6, src: "read", age: "x" }; refreshVolume();`);
+  h.drag(-5);
+  h.t.advance(300);                         // -5 in flight, expecting -6
+  h.run("room().dev = -4");                 // so the agent will refuse it as changed elsewhere
+  act(h, "lower");
+  assert.equal(h.room().ui.want, -30);
+  h.t.advance(4000);
+  assert.equal(h.room().dev, -30);
+  assert.equal(h.room().ui.msg.kind, "set");
+});
+
+test("Q8: dragging after Lower replaces it with an ordinary change", () => {
+  const h = open();
+  h.unlock(true);
+  h.run(`room().dev = -6; room().vol = { v: -6, src: "read", age: "x" }; refreshVolume();`);
+  h.drag(-5);
+  h.t.advance(300);                         // -5 in flight
+  act(h, "lower");
+  h.drag(-20);
+  assert.equal(h.run("room().ui.wantLower"), false);
+  h.t.advance(4000);
+  assert.equal(h.room().dev, -20);
+});
+
+test("Q9: headphone gain shows only on models known to have a headphone output", () => {
+  const section = (id) => {
+    const h = open(id);
+    act(h, "more");
+    return app(h);
+  };
+  assert.match(section("office"), /<h2>Headphone gain<\/h2>/);
+  assert.match(section("den"), /<h2>Headphone gain<\/h2>/, "a DX5 II on line out still has the output");
+  assert.match(section("bedroom"), /<h2>Headphone gain<\/h2>/);
+  for (const id of ["living", "guest", "kitchen"]) {
+    const page = section(id);
+    assert.doesNotMatch(page, /<h2>Headphone gain<\/h2>/, id);
+    assert.doesNotMatch(page, /More: headphone gain/, id);
+    assert.match(page, /More: power, EQ preset/, id);
+    assert.match(page, /No headphone gain here/, id);
+  }
 });
