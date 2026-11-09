@@ -1,15 +1,28 @@
 #!/usr/bin/env python3
-"""toppingd -- the per-host agent behind the toppingctl web UI. Read-only.
+"""toppingd -- the per-host agent behind the toppingctl web UI. Dry-run only.
 
-Plan: docs/plans/2026-10-26-web-ui-architecture-plan.md, build step 2. This
-build serves identity and state and sends no writes at all: it has no write
-route, its only mode is dry-run, and its handle wrapper refuses any frame
-that is not a readNack in CONFIRMED_READS for the model.
+Plan: docs/plans/2026-10-26-web-ui-architecture-plan.md, build steps 2 and 4
+(the agent half of step 4, in dry-run). This build sends no writes at all:
+its only mode is dry-run, the volume route returns the frames it would send
+and sends nothing, and its handle wrapper refuses any frame that is not a
+readNack in CONFIRMED_READS for the model.
 
     GET /v1/room             identity: host, room, DAC, read path, mode, and
                              whether the device lock file can be opened
     GET /v1/state[?fresh=1]  state from the model's read path; fresh=1 reads
                              the device, otherwise the cached read and its age
+    POST /v1/volume          {target_db, expected_db, unlock_id?}: reads the
+                             device, checks expected_db against that read in
+                             raw units (409 changed), applies the -10 dB rule,
+                             and returns the frames, with an undo token
+                             {target_db, lower_if_louder: true}: "Lower to
+                             -30 dB" -- no expected_db, no 409; writes only if
+                             the fresh read is louder than the target
+    POST /v1/unlocks         {} -> {unlock_id, expires_at}: 60 s above -10 dB
+    DELETE /v1/unlocks/{id}  discards an unlock
+
+Undo is a volume write: POST /v1/volume with the undo token's target_db and
+expected_db (the plan's "Undo of a volume change is a volume write").
 
 Run it with a YAML config (toppingd.yaml.example):
 
@@ -38,8 +51,10 @@ import hashlib
 import hmac
 import http.server
 import json
+import math
 import os
 import re
+import secrets
 import socket
 import stat
 import subprocess
@@ -54,6 +69,7 @@ import devstate
 import toppingctl
 from toppingctl import (
     CONFIRMED_READS,
+    CONFIRMED_WRITES,
     DEVICES,
     DX1_F_HP_VOL,
     DX1_F_LO_VOL,
@@ -61,22 +77,40 @@ from toppingctl import (
     DX1_F_MUTE,
     DX1_F_OPT_VOL,
     DX1_MUTE,
+    REG_CTRL,
+    SUB_COMMIT,
+    SUB_VOLUME,
+    VOL_WARN_DB,
     DeviceBusy,
     Refused,
+    check_volume_range,
     dx1_raw_to_db,
     find_devices,
     open_checked,
+    plan_volume,
+    volume_steps,
 )
 from vendor_commands import COMMANDS, ENUMS, FIELD_ENUM, SETTINGS_FIELDS
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 PROG = "toppingd"
 
 DEFAULT_CONFIG = "/etc/toppingd/toppingd.yaml"
 CONFIG_KEYS = {"listen", "room", "device", "mode", "key_file", "state_dir"}
-# Only dry-run exists until step 4 adds writes. There is deliberately no
-# config key that makes an unverified model writable.
+# Only dry-run exists: live waits for the front-panel checks of step 4
+# (TOPPINGCTL-7/8/9). There is deliberately no config key that makes an
+# unverified model writable.
 MODES = ("dry-run",)
+
+# "Allow above -10 dB for 60 s" (George, 2026-11-01 and 2026-11-03). Volume
+# writes don't consume an unlock; only the cap, DELETE or a 409 ends it.
+UNLOCK_SECS = 60
+UNLOCK_ID = re.compile(r"[A-Za-z0-9_-]{16,64}")
+VOLUME_KEYS = {"target_db", "expected_db", "unlock_id", "lower_if_louder"}
+# The frames a volume write is: 71 02 and the commit.
+VOLUME_WRITES = frozenset([(REG_CTRL, SUB_VOLUME), (REG_CTRL, SUB_COMMIT)])
+# GetSettings record indexes (vendor_commands.SETTINGS_FIELDS).
+REC_VOLUME, REC_VOLUME_STEP = 9, 32
 
 # The plan's waits: the agent gives up on the device lock after 2 s and
 # answers 423, well inside toppingweb's 10 s response timeout.
@@ -291,6 +325,34 @@ class ReadOnlyHandle:
         self._h.close()
 
 
+def volume_writable(key):
+    """Whether a volume write may be planned for this model: confirmed in
+    DEVICES, read through GetSettings (where volumeStep comes from), and
+    with both of its frames in CONFIRMED_WRITES. Today only the DX5 II."""
+    spec = DEVICES.get(key) or {}
+    return (
+        spec.get("status") == "confirmed"
+        and read_path(key) == "get_settings"
+        and VOLUME_WRITES <= CONFIRMED_WRITES.get(key, frozenset())
+    )
+
+
+def check_agent_writes(key, frames):
+    """The agent's write gate, on every model whatever its status: the NEVER
+    set first, then only write frames in CONFIRMED_WRITES. In dry-run these
+    frames are returned, not sent; ReadOnlyHandle would refuse them anyway."""
+    allowed = CONFIRMED_WRITES.get(key, frozenset())
+    for f in frames:
+        reg, sub = f.reg_sub
+        if f.reg_sub in NEVER_REGS:
+            raise Refused(f"refusing {reg:02x} {sub:02x}: in the NEVER set")
+        if f.opcode != 0x20 or f.reg_sub not in allowed:
+            raise Refused(
+                f"refusing opcode {f.opcode:02x} to {reg:02x} {sub:02x} on {key}: "
+                "not in CONFIRMED_WRITES"
+            )
+
+
 # --- identity and the per-model read paths ------------------------------------
 
 READ_PATHS = {
@@ -463,9 +525,41 @@ class Unavailable(Exception):
         self.holder = holder
 
 
+class BadRequest(Exception):
+    pass
+
+
+def _number(body, name):
+    v = body.get(name)
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        raise BadRequest(f"{name} must be a number of dB")
+    try:
+        v = float(v)  # a 400-digit int doesn't fit a float
+    except OverflowError:
+        v = math.inf
+    # json.loads accepts NaN and Infinity; a level can't be either.
+    if not math.isfinite(v):
+        raise BadRequest(f"{name} must be a number of dB")
+    try:
+        check_volume_range(v)
+    except Refused as e:
+        raise BadRequest(f"{name}: {e}") from None
+    return v
+
+
+def _level(raw, step):
+    # + 0.0 so raw 0 is 0.0 dB, not -0.0.
+    return {"db": -raw * step + 0.0, "raw": raw, "volume_step_db": step}
+
+
 class Agent:
     def __init__(
-        self, room, configured_device="auto", state_dir="/var/lib/toppingctl", mode="dry-run"
+        self,
+        room,
+        configured_device="auto",
+        state_dir="/var/lib/toppingctl",
+        mode="dry-run",
+        now=time.time,
     ):
         if mode not in MODES:
             raise ValueError(f"mode {mode!r}: this build only runs {', '.join(MODES)}")
@@ -473,8 +567,13 @@ class Agent:
         self.configured_device = configured_device
         self.state_dir = state_dir
         self.mode = mode
+        self.now = now  # the unlocks' clock; injectable for the tests
         self._hid = threading.Lock()  # one device operation at a time
         self._cache = None  # (state dict, time.time() of the read)
+        # unlock_id -> expiry, in self.now() seconds. Memory only: a restart
+        # drops every unlock, which is safe (plan Q6).
+        self._unlocks = {}
+        self._unlocks_mu = threading.Lock()
 
     def room_info(self):
         dac = identify(self.configured_device)
@@ -488,8 +587,8 @@ class Agent:
             "read_path": read_path(key) if key else None,
             "device_lock": device_lock_status(),
             "capabilities": {
-                # Read-only build: no model gets a write, confirmed or not.
-                "writes": [],
+                # In dry-run "volume" means planned and returned, not sent.
+                "writes": ["volume"] if key and volume_writable(key) else [],
                 "reads": sorted(f"{r:02x} {s:02x}" for r, s in CONFIRMED_READS.get(key, ())),
             },
         }
@@ -498,7 +597,195 @@ class Agent:
         if not fresh and self._cache:
             st, at = self._cache
             return 200, {**st, "cached": True, "age_s": round(time.time() - at, 1)}
-        return self._read()
+        status, body, _ = self._read()
+        return status, body
+
+    # --- unlocks --------------------------------------------------------------
+
+    def create_unlock(self):
+        """POST /v1/unlocks. Sends nothing and needs no DAC: it only lets a
+        volume write above -10 dB through for the next UNLOCK_SECS."""
+        with self._unlocks_mu:
+            now = self.now()
+            self._unlocks = {u: t for u, t in self._unlocks.items() if t > now}
+            uid = secrets.token_urlsafe(24)
+            self._unlocks[uid] = now + UNLOCK_SECS
+        return 200, {
+            "unlock_id": uid,
+            "expires_at": _iso(now + UNLOCK_SECS),
+            "expires_in_s": UNLOCK_SECS,
+        }
+
+    def discard_unlock(self, uid):
+        """DELETE /v1/unlocks/{id}: Cancel, leaving the room, signing out or
+        unticking the box. Discarding an unknown or expired one is not an
+        error: the UI may call it after the cap."""
+        with self._unlocks_mu:
+            found = self._unlocks.pop(uid, None) is not None
+        return 200, {"unlock_id": uid, "discarded": found}
+
+    def _unlock_problem(self, uid):
+        """None if `uid` is a live unlock, else why it isn't. Checked when the
+        write runs, not when the UI queued it."""
+        if uid is None:
+            return "no unlock_id was sent"
+        with self._unlocks_mu:
+            expiry = self._unlocks.get(uid)
+            if expiry is None:
+                return "the unlock is unknown, cancelled, or was discarded by a 409"
+            if self.now() >= expiry:
+                del self._unlocks[uid]
+                return f"the unlock expired ({UNLOCK_SECS} s)"
+        return None
+
+    # --- volume ---------------------------------------------------------------
+
+    def volume(self, body):
+        """POST /v1/volume {target_db, expected_db, unlock_id?}: every volume
+        change, undo included. Reads the device, then decides in the same
+        operation (_volume_decision). Dry-run: the frames come back, unsent.
+
+        {target_db, lower_if_louder: true} is "Lower to -30 dB": "Always
+        lower if louder" (George, 2026-11-08, #40 Q8). expected_db is neither
+        required nor compared, so it never answers 409; if the fresh read is
+        louder than the target it plans the target (quieter, so no unlock),
+        otherwise it plans nothing and answers 200."""
+        if not isinstance(body, dict):
+            raise BadRequest("the body must be a JSON object")
+        extra = set(body) - VOLUME_KEYS
+        if extra:
+            raise BadRequest(
+                f"unknown keys {', '.join(sorted(extra))}: /v1/volume sets volume only; "
+                "other changes go through /v1/plans"
+            )
+        lower = body.get("lower_if_louder", False)
+        if not isinstance(lower, bool):
+            raise BadRequest("lower_if_louder must be true or false")
+        target = _number(body, "target_db")
+        expected = None if lower else _number(body, "expected_db")
+        uid = body.get("unlock_id")
+        if uid is not None and not (isinstance(uid, str) and UNLOCK_ID.fullmatch(uid)):
+            raise BadRequest("unlock_id must be an id from POST /v1/unlocks")
+        status, obj = self._volume_op(target, expected, uid)
+        if lower and status == 200:
+            obj.setdefault("lowered", True)
+        return status, obj
+
+    def _volume_op(self, target, expected, uid):
+        """The model checks, then the read and the decision under one lock
+        and open. expected=None is lower_if_louder: no compare-and-set."""
+        dac = identify(self.configured_device)
+        key = dac.get("key") if dac["status"] == "found" else None
+        if key is None:
+            return 503, {"error": "unavailable", "status": dac["status"], "dac": dac}
+        if not volume_writable(key):
+            return 403, {
+                "error": "model_unverified",
+                "reason": (
+                    f"{DEVICES[key]['name']} is {DEVICES[key]['status']}: this agent writes "
+                    "volume only on a model confirmed on hardware, and no setting changes that"
+                ),
+            }
+        spec = DEVICES[key]
+        status, st, decided = self._read(
+            dac, then=lambda rec: self._volume_decision(spec, key, rec, target, expected, uid)
+        )
+        if decided is None:  # the read failed or the device was busy
+            return (status if status != 200 else 503), {
+                "error": st["status"],
+                "reason": st.get("error") or st["fields"]["volume_db"].get("reason"),
+                "state": st,
+            }
+        status, obj = decided
+        if status in (409, 503):  # changed elsewhere, or a read that can't anchor a write
+            obj["state"] = st
+        return status, obj
+
+    def _volume_decision(self, spec, key, rec, target, expected, uid):
+        """The plan's rules, in its order: (a) compare-and-set on expected_db
+        in raw units, (b) the -10 dB rule before and after quantising.
+        expected=None is lower_if_louder, which skips (a) by decision Q8."""
+        if REC_VOLUME not in rec or REC_VOLUME_STEP not in rec:
+            # The read worked (and is cached); it just can't anchor a write.
+            return 503, {
+                "error": "read_failed",
+                "reason": "volume or volumeStep not in the read; nothing to compare with",
+            }
+        step = 1.0 if rec[REC_VOLUME_STEP] == 1 else 0.5
+        before_raw = rec[REC_VOLUME]
+        before = _level(before_raw, step)
+        if expected is None:
+            if volume_steps(target, step)[0] <= before_raw:
+                # Already at or below the target: lowering never raises it.
+                return 200, {
+                    "mode": self.mode,
+                    "sent": False,
+                    "lowered": False,
+                    "reason": f"the device reads {before['db']:+.1f} dB, not louder than "
+                    f"{target:+.1f} dB",
+                    "before": before,
+                    "frames": [],
+                    "loud_result": before["db"] > VOL_WARN_DB,
+                }
+            # Anchor on the read just taken, so (a) holds by construction.
+            expected = before["db"]
+        expected_raw, expected_on_grid = volume_steps(expected, step)
+        if expected_on_grid != expected or expected_raw != before_raw:
+            # A 409 discards the unlock it carried, as Cancel does.
+            discarded = uid is not None and self.discard_unlock(uid)[1]["discarded"]
+            return 409, {
+                "error": "changed",
+                "reason": (
+                    f"the device reads {before['db']:+.1f} dB, not the {expected:+.1f} dB "
+                    "this change started from"
+                ),
+                "before": before,
+                "unlock_discarded": discarded,
+            }
+        steps, actual = volume_steps(target, step)
+        # "Quieter is always allowed": not louder than the fresh read, both
+        # as asked and as quantised. More raw steps is more attenuation.
+        quieter = target <= before["db"] and steps >= before_raw
+        problem = None if quieter else self._unlock_problem(uid)
+        try:
+            # plan_volume runs check_loud on the requested level and on the
+            # quantised one: the same -10 dB check the CLI's vol uses.
+            frames = plan_volume(spec, target, step, allow_loud=quieter or problem is None)
+        except Refused:
+            return 403, {
+                "error": "unlock_required",
+                "reason": (
+                    f"{max(target, actual):+.1f} dB is above {VOL_WARN_DB:+.0f} dB and louder "
+                    f"than the device's {before['db']:+.1f} dB, so it needs a live unlock: "
+                    f"{problem}"
+                ),
+                "before": before,
+            }
+        try:
+            check_agent_writes(key, frames)
+            # The decision above used its own quantising; the frame must
+            # carry the same raw level, so a quieter-by-the-check write can't
+            # go out louder.
+            sent_raw = int.from_bytes(frames[0].data[7:11], "big")
+            if frames[0].reg_sub != (REG_CTRL, SUB_VOLUME) or sent_raw != steps:
+                raise Refused(
+                    f"refusing: the planned frame carries raw {sent_raw}, not the {steps} "
+                    "the -10 dB check was made on"
+                )
+        except Refused as e:
+            return 403, {"error": "refused", "reason": str(e), "before": before}
+        after = _level(steps, step)
+        return 200, {
+            "mode": self.mode,
+            "sent": False,
+            "before": before,
+            "after_predicted": after,
+            "frames": [{"hex": f.data.hex(" "), "label": f.label} for f in frames],
+            "loud_result": after["db"] > VOL_WARN_DB,
+            # POST this back to /v1/volume to undo. For a burst of writes the
+            # UI keeps the first write's target_db and the last's expected_db.
+            "undo": {"target_db": before["db"], "expected_db": after["db"]},
+        }
 
     def _base(self, dac, status, **extra):
         written, wat = read_written(self.state_dir) if dac.get("key") else ({}, None)
@@ -507,8 +794,11 @@ class Agent:
         fields["preamp_db"] = _written(written, wat, "preamp_db")
         return {"room": self.room, "status": status, "dac": dac, "fields": fields, **extra}
 
-    def _read(self):
-        dac = identify(self.configured_device)
+    def _read(self, dac=None, then=None):
+        """A fresh read -> (http status, state body, then's result or None).
+        `then(rec)` runs on a GetSettings read under the same lock and open,
+        so a write decided from the read can't be interleaved."""
+        dac = dac or identify(self.configured_device)
         if dac["status"] != "found":
             reasons = {
                 "no_dac": "no DAC found on this host",
@@ -518,14 +808,14 @@ class Agent:
             }
             # The cached read no longer describes the room; nor below.
             self._cache = None
-            return 200, self._base(dac, dac["status"], reason=reasons[dac["status"]])
+            return 200, self._base(dac, dac["status"], reason=reasons[dac["status"]]), None
         key = dac["key"]
         path = read_path(key)
         if path is None:
             self._cache = None
-            return 200, self._base(dac, "not_read", reason=NO_READ_REASON)
+            return 200, self._base(dac, "not_read", reason=NO_READ_REASON), None
         try:
-            at, fields, settings, volumes = self._device_read(key, path)
+            at, fields, settings, volumes, extra = self._device_read(key, path, then)
         except Unavailable as e:
             # Busy with this agent's own read says nothing new about the
             # room, so the last read stays servable, with its age. Another
@@ -536,16 +826,16 @@ class Agent:
             body = self._base(dac, e.status, reason=e.message, error=e.message)
             if e.holder:
                 body["holder"] = e.holder
-            return e.http, body
+            return e.http, body, None
         body = self._base(dac, "read", read_path=path, at=_iso(at))
         body["fields"].update(fields)
         body["settings"] = settings
         if volumes is not None:
             body["volumes_db"] = volumes
         self._cache = (body, at)
-        return 200, {**body, "cached": False, "age_s": 0.0}
+        return 200, {**body, "cached": False, "age_s": 0.0}, extra
 
-    def _device_read(self, key, path):
+    def _device_read(self, key, path, then=None):
         deadline = time.monotonic() + AGENT_LOCK_WAIT
         if not self._hid.acquire(timeout=AGENT_LOCK_WAIT):
             holder = f"{PROG} (pid {os.getpid()})"
@@ -559,11 +849,14 @@ class Agent:
                     at = time.time()
                     if path == "get_settings":
                         rec = devstate.read_settings(key, secs=READ_SECS, h=h)
-                        return (at, *decode_dx5(rec, at), None)
+                        decoded = decode_dx5(rec, at)
+                        return (at, *decoded, None, then(rec) if then else None)
+                    if then:
+                        raise RuntimeError(f"no write is planned from the {path} read")
                     st = devstate.dx1_state(key, skip_peq_dump=True, h=h)
                     if not st["block"]:
                         raise RuntimeError("the 0x810a block read returned nothing")
-                    return (at, *decode_dx1(st, at))
+                    return (at, *decode_dx1(st, at), None)
                 except Refused as e:
                     raise Unavailable("read_failed", f"refused: {e}") from None
                 except RuntimeError as e:
@@ -676,27 +969,56 @@ class Handler(http.server.BaseHTTPRequestHandler):
             error = "clock_unsynced" if e.status == 503 else "unauthorized"
             return self._send(e.status, {"error": error, "reason": e.reason})
         url = urlsplit(self.path)
-        routes = {"/v1/room": self._room, "/v1/state": self._state}
-        if url.path not in routes:
+        prefix = "/v1/unlocks/"
+        if url.path.startswith(prefix) and UNLOCK_ID.fullmatch(url.path[len(prefix) :]):
+            uid = url.path[len(prefix) :]
+            methods = {"DELETE": lambda q, b: self.agent.discard_unlock(uid)}
+        else:
+            methods = {
+                "/v1/room": {"GET": self._room},
+                "/v1/state": {"GET": self._state},
+                "/v1/volume": {"POST": lambda q, b: self.agent.volume(_json(b))},
+                "/v1/unlocks": {"POST": self._unlock},
+            }.get(url.path)
+        if methods is None:
             return self._send(404, {"error": "not_found"}, nonce)
-        if self.command != "GET":
+        if self.command not in methods:
             return self._send(
-                405, {"error": "method_not_allowed", "reason": "this agent is read-only"}, nonce
+                405,
+                {"error": "method_not_allowed", "reason": f"{url.path} takes {', '.join(methods)}"},
+                nonce,
             )
         try:
-            status, obj = routes[url.path](parse_qs(url.query))
+            status, obj = methods[self.command](parse_qs(url.query), body)
+        except BadRequest as e:
+            status, obj = 400, {"error": "bad_request", "reason": str(e)}
         except Exception as e:  # report, don't drop the connection unsigned
             log(f"error on {url.path}: {e!r}")
             status, obj = 500, {"error": "internal", "reason": str(e)}
         self._send(status, obj, nonce)
 
-    def _room(self, query):
+    def _room(self, query, body):
         return 200, self.agent.room_info()
 
-    def _state(self, query):
+    def _state(self, query, body):
         return self.agent.state(fresh=query.get("fresh") == ["1"])
 
+    def _unlock(self, query, body):
+        if _json(body) != {}:
+            raise BadRequest("POST /v1/unlocks takes {}")
+        return self.agent.create_unlock()
+
     do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = _handle
+
+
+def _json(body):
+    """A request body as JSON; empty is {}."""
+    if not body:
+        return {}
+    try:
+        return json.loads(body)
+    except (ValueError, RecursionError):
+        raise BadRequest("the body is not valid JSON") from None
 
 
 def make_server(address, agent, auth):
@@ -746,8 +1068,8 @@ def load_config(path):
     mode = cfg.get("mode", "dry-run")
     if mode not in MODES:
         raise ConfigError(
-            f"mode {mode!r} isn't available: this build is read-only and only runs "
-            "dry-run (live arrives with volume writes, plan step 4)"
+            f"mode {mode!r} isn't available: this build only runs dry-run, which sends "
+            "no writes (live waits for the front-panel checks of plan step 4)"
         )
     device = cfg.get("device", "auto")
     if not isinstance(device, str) or (device != "auto" and device not in DEVICES):

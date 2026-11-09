@@ -5,6 +5,6 @@
 listen: 0.0.0.0:8740          # (proposal) port
 # room: office                # defaults to the hostname
 device: auto                  # or a DEVICES key; auto = match the product string
-mode: dry-run                 # the only mode this build runs: it is read-only
+mode: dry-run                 # the only mode this build runs: it sends no writes
 key_file: /etc/toppingd/key   # HMAC key shared with toppingweb, mode 0600
 state_dir: /var/lib/toppingctl
