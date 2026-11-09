@@ -410,6 +410,21 @@ class RoutesTest(AgentTestCase):
             self.assertEqual(self.get(path)[0], 200)
         self.assertEqual(set(self.readnacks()), {(0x10, 0x71, 0x0C)})
 
+    def test_no_route_sends_a_write_in_dry_run(self):
+        uid = self.send("/v1/unlocks", {})[1]["unlock_id"]
+        calls = [
+            ("GET", "/v1/room", None),
+            ("GET", "/v1/state?fresh=1", None),
+            ("POST", "/v1/volume", {"target_db": -5, "expected_db": -30, "unlock_id": uid}),
+            ("POST", "/v1/volume", {"target_db": -40, "expected_db": -30}),
+            ("POST", "/v1/volume", {"target_db": -40, "expected_db": -31, "unlock_id": uid}),
+            ("DELETE", f"/v1/unlocks/{uid}", None),
+        ]
+        for method, path, body in calls:
+            with self.subTest(method=method, path=path):
+                self.assertIn(self.send(path, body, method=method)[0], (200, 409))
+        self.assertEqual(set(self.readnacks()), {(0x10, 0x71, 0x0C)})
+
 
 class Dx5StateTest(AgentTestCase):
     """DX5 II: GetSettings, decoded with the device's volumeStep."""
@@ -743,6 +758,7 @@ class VolumeTestCase(AgentTestCase):
 
     def assert_no_write_sent(self):
         """Dry-run: the DAC saw readNacks to GetSettings and nothing else."""
+        self.assertTrue(self.readnacks(), "expected the operation to read the device")
         for opcode, reg, sub in self.readnacks():
             self.assertEqual((opcode, reg, sub), (0x10, 0x71, 0x0C))
 
@@ -824,6 +840,8 @@ class VolumeTest(VolumeTestCase):
         self.assertEqual((status, out["error"]), (503, "read_failed"))
         self.assertIn("volumeStep", out["reason"])
         self.assert_no_write_sent()
+        # The read itself worked, so it stays servable.
+        self.assertTrue(self.get("/v1/state")[1]["cached"])
 
     def test_bad_requests_open_nothing(self):
         cases = [
@@ -832,6 +850,9 @@ class VolumeTest(VolumeTestCase):
             {"target_db": True, "expected_db": -30},
             {"target_db": "-25", "expected_db": -30},
             {"target_db": 3, "expected_db": -30},
+            {"target_db": 10**400, "expected_db": -30},
+            {"target_db": -20, "expected_db": -1.7e308},
+            {"target_db": -20, "expected_db": 5},
             {"target_db": -25, "expected_db": -30, "unlock_id": 7},
             {"target_db": -25, "expected_db": -30, "unlock_id": "../x"},
             [],
@@ -840,7 +861,7 @@ class VolumeTest(VolumeTestCase):
             with self.subTest(body=body):
                 status, out = self.send("/v1/volume", body)
                 self.assertEqual((status, out["error"]), (400, "bad_request"))
-        for raw in (b"not json", b'{"target_db": NaN, "expected_db": -30}'):
+        for raw in (b"not json", b'{"target_db": NaN, "expected_db": -30}', b"[" * 60000):
             with self.subTest(raw=raw):
                 self.assertEqual(self.call("/v1/volume", method="POST", body=raw)[0], 400)
         self.assertEqual(self.dac.opens, 0)
@@ -878,6 +899,12 @@ class VolumeModelTest(VolumeTestCase):
         self.products = ()
         self.start()
         self.assertEqual(self.check_refused("unavailable", http=503)["status"], "no_dac")
+
+    def test_several_dacs(self):
+        self.products = ("DX5 II", "DX1 II")
+        self.start()
+        self.assertEqual(self.check_refused("unavailable", http=503)["status"], "several")
+        self.assertEqual(self.dac.opens, 0)
 
     def test_emptied_confirmed_writes_refuse(self):
         with mock.patch.dict(toppingctl.CONFIRMED_WRITES, {"dx5ii": frozenset()}):
@@ -938,6 +965,7 @@ class LoudTest(VolumeTestCase):
         # -9.6 quantises to -10.0 on one_db, but -9.6 was asked for.
         status, out = self.volume(-9.6, -30)
         self.assertEqual((status, out["error"]), (403, "unlock_required"))
+        self.assertTrue(out["reason"].startswith("-9.6 dB is above"), out["reason"])
 
     def test_quantised_level_is_checked_too(self):
         # A quantiser that rounds one step louder: the after-quantising check
@@ -948,7 +976,13 @@ class LoudTest(VolumeTestCase):
 
         with mock.patch.object(toppingctl, "volume_steps", louder):
             status, out = self.volume(-10, -30)
-        self.assertEqual((status, out["error"]), (403, "unlock_required"))
+            self.assertEqual((status, out["error"]), (403, "unlock_required"))
+            # Quieter by the agent's own check, but the frame would go out
+            # one step louder: refused, because the frame is checked too.
+            self.level(-10)
+            status, out = self.volume(-10, -10)
+            self.assertEqual((status, out["error"]), (403, "refused"))
+            self.assertIn("raw 9, not the 10", out["reason"])
 
     def test_rounding_never_carries_an_accepted_level_above_minus_10(self):
         for step in (1, 0):
@@ -1031,7 +1065,8 @@ class UnlockTest(VolumeTestCase):
         self.clock[0] += 40
         self.assertEqual(self.volume(-5, -7, uid)[0], 200)
         self.level(-5)
-        # One write queued behind another: both run under the same unlock.
+        # Two writes at once: the second waits for the first, and both run
+        # under the same unlock.
         self.clock[0] += 10
         results = []
         threads = [

@@ -528,10 +528,20 @@ class BadRequest(Exception):
 
 def _number(body, name):
     v = body.get(name)
-    # json.loads accepts NaN and Infinity; a level can't be either.
-    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
         raise BadRequest(f"{name} must be a number of dB")
-    return float(v)
+    try:
+        v = float(v)  # a 400-digit int doesn't fit a float
+    except OverflowError:
+        v = math.inf
+    # json.loads accepts NaN and Infinity; a level can't be either.
+    if not math.isfinite(v):
+        raise BadRequest(f"{name} must be a number of dB")
+    try:
+        check_volume_range(v)
+    except Refused as e:
+        raise BadRequest(f"{name}: {e}") from None
+    return v
 
 
 def _level(raw, step):
@@ -643,10 +653,6 @@ class Agent:
         uid = body.get("unlock_id")
         if uid is not None and not (isinstance(uid, str) and UNLOCK_ID.fullmatch(uid)):
             raise BadRequest("unlock_id must be an id from POST /v1/unlocks")
-        try:
-            check_volume_range(target)
-        except Refused as e:
-            raise BadRequest(str(e)) from None
         dac = identify(self.configured_device)
         key = dac.get("key") if dac["status"] == "found" else None
         if key is None:
@@ -663,7 +669,7 @@ class Agent:
         status, st, decided = self._read(
             dac, then=lambda rec: self._volume_decision(spec, key, rec, target, expected, uid)
         )
-        if decided is None:  # the read itself failed or was busy
+        if decided is None:  # the read failed or the device was busy
             return (status if status != 200 else 503), {
                 "error": st["status"],
                 "reason": st.get("error") or st["fields"]["volume_db"].get("reason"),
@@ -678,7 +684,11 @@ class Agent:
         """The plan's rules, in its order: (a) compare-and-set on expected_db
         in raw units, (b) the -10 dB rule before and after quantising."""
         if REC_VOLUME not in rec or REC_VOLUME_STEP not in rec:
-            raise RuntimeError("volume or volumeStep not in the read; nothing to compare with")
+            # The read worked (and is cached); it just can't anchor a write.
+            return 503, {
+                "error": "read_failed",
+                "reason": "volume or volumeStep not in the read; nothing to compare with",
+            }
         step = 1.0 if rec[REC_VOLUME_STEP] == 1 else 0.5
         before_raw = rec[REC_VOLUME]
         before = _level(before_raw, step)
@@ -708,13 +718,23 @@ class Agent:
             return 403, {
                 "error": "unlock_required",
                 "reason": (
-                    f"{actual:+.1f} dB is above {VOL_WARN_DB:+.0f} dB and louder than the "
-                    f"device's {before['db']:+.1f} dB, so it needs a live unlock: {problem}"
+                    f"{max(target, actual):+.1f} dB is above {VOL_WARN_DB:+.0f} dB and louder "
+                    f"than the device's {before['db']:+.1f} dB, so it needs a live unlock: "
+                    f"{problem}"
                 ),
                 "before": before,
             }
         try:
             check_agent_writes(key, frames)
+            # The decision above used its own quantising; the frame must
+            # carry the same raw level, so a quieter-by-the-check write can't
+            # go out louder.
+            sent_raw = int.from_bytes(frames[0].data[7:11], "big")
+            if frames[0].reg_sub != (REG_CTRL, SUB_VOLUME) or sent_raw != steps:
+                raise Refused(
+                    f"refusing: the planned frame carries raw {sent_raw}, not the {steps} "
+                    "the -10 dB check was made on"
+                )
         except Refused as e:
             return 403, {"error": "refused", "reason": str(e), "before": before}
         after = _level(steps, step)
@@ -960,7 +980,7 @@ def _json(body):
         return {}
     try:
         return json.loads(body)
-    except ValueError:
+    except (ValueError, RecursionError):
         raise BadRequest("the body is not valid JSON") from None
 
 
