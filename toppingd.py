@@ -676,7 +676,7 @@ class Agent:
                 "state": st,
             }
         status, obj = decided
-        if status == 409:
+        if status in (409, 503):  # changed elsewhere, or a read that can't anchor a write
             obj["state"] = st
         return status, obj
 

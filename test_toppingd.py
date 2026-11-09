@@ -839,6 +839,7 @@ class VolumeTest(VolumeTestCase):
         status, out = self.volume(-25, -30)
         self.assertEqual((status, out["error"]), (503, "read_failed"))
         self.assertIn("volumeStep", out["reason"])
+        self.assertEqual(out["state"]["status"], "read")
         self.assert_no_write_sent()
         # The read itself worked, so it stays servable.
         self.assertTrue(self.get("/v1/state")[1]["cached"])
