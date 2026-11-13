@@ -1,5 +1,5 @@
 # Dev tooling for CI. Pinned so `ruff format --check` only changes verdict when
 # Renovate bumps it -- a reformatting release then arrives as its own PR.
-ruff==0.17.4
+ruff==0.17.5
 # toppingd.py reads its YAML config with it; test_toppingd needs it importable.
 pyyaml==6.0.3
