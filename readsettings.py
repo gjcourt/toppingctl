@@ -62,8 +62,6 @@ def dx1_show(st):
     print("write-only registers' state arrives as unsolicited pushes)")
     labels = {
         "state": ("state", {1: "working", 2: "standby"}),
-        "analogBalance": ("analogBalance", None),
-        "optBalance": ("optBalance", None),
         "remoteArrow": ("remoteArrow", None),
         "remoteMute": ("remoteMute", None),
         "knobSingle": ("knobSingle", None),

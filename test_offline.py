@@ -290,6 +290,12 @@ class Dx1SceneRecallTest(unittest.TestCase):
     connectState, never a readNack, which writes on this model -- and what it
     set is read from what the device pushes after it."""
 
+    def test_balance_pushes_keep_their_names(self):
+        # #43 took 81 0b / 81 0c out of DX1_STATE_QUERIES, which this map is
+        # built from; a recall's push can still carry them.
+        names = self.scenes.DX1_SINGLE_NAMES
+        self.assertEqual((names[0x810B], names[0x810C]), ("analogBalance", "optBalance"))
+
     def setUp(self):
         import scenes
 
@@ -656,7 +662,8 @@ class Dx1ReadSafeListTest(unittest.TestCase):
         expected = {(int(r, 16) >> 8, int(r, 16) & 0xFF) for r in listed.split()}
         self.assertEqual(set(toppingctl.DX1_VENDOR_READ_SAFE), expected)
         self.assertEqual(
-            toppingctl.CONFIRMED_READS["dx1ii"], expected - set(toppingctl.DX1_READ_WRITES)
+            toppingctl.CONFIRMED_READS["dx1ii"],
+            expected - set(toppingctl.DX1_READ_WRITES) - set(toppingctl.DX1_VENDOR_UNREAD),
         )
 
     def test_0x1106_is_read_but_not_confirmed(self):
@@ -672,7 +679,8 @@ class Dx1ReadSafeListTest(unittest.TestCase):
     def test_vendor_listed_registers_that_write_are_never_read(self):
         # #32: on a DX1 II, a readNack (data 0) to 0x7900 / 0x7d00 set
         # autoStandby / autoScreenOff from 4 ("Never") to 0 -- vendor list or not.
-        bad = {(0x79, 0x00), (0x7D, 0x00)}
+        # #43: 0x810b (analogBalance) went from L 3.0 dB to centre the same way.
+        bad = {(0x79, 0x00), (0x7D, 0x00), (0x81, 0x0B)}
         self.assertEqual(set(toppingctl.DX1_READ_WRITES), bad)
         self.assertLessEqual(bad, set(toppingctl.DX1_VENDOR_READ_SAFE))
         self.assertFalse(bad & set(toppingctl.DX1_READ_REGS))
@@ -680,6 +688,29 @@ class Dx1ReadSafeListTest(unittest.TestCase):
         self.assertFalse(bad & set(devstate.DX1_STATE_QUERIES))
         self.assertNotIn("autoStandby", devstate.DX1_STATE_QUERIES.values())
         self.assertNotIn("autoScreenOff", devstate.DX1_STATE_QUERIES.values())
+        self.assertNotIn("analogBalance", devstate.DX1_STATE_QUERIES.values())
+
+    def test_balance_registers_are_never_read(self):
+        # #43: 0x810b measured writing; 0x810c (optBalance) untested and never
+        # read by the vendor app. Kept apart, and not labelled as measured.
+        balance = {(0x81, 0x0B), (0x81, 0x0C)}
+        self.assertEqual(set(toppingctl.DX1_VENDOR_UNREAD), {(0x81, 0x0C)})
+        self.assertNotIn((0x81, 0x0C), toppingctl.DX1_READ_WRITES)
+        self.assertLessEqual(balance, set(toppingctl.DX1_VENDOR_READ_SAFE))
+        self.assertFalse(balance & set(toppingctl.DX1_READ_REGS))
+        self.assertFalse(balance & toppingctl.CONFIRMED_READS["dx1ii"])
+        self.assertFalse(balance & set(devstate.DX1_STATE_QUERIES))
+        self.assertNotIn("optBalance", devstate.DX1_STATE_QUERIES.values())
+        # 84 00 is read by the vendor app on connect (#43's capture): it stays.
+        self.assertIn((0x84, 0x00), devstate.DX1_STATE_QUERIES)
+
+    def test_dx1_query_refuses_the_balance_registers_before_writing(self):
+        for reg, why in (((0x81, 0x0B), "measured writing"), ((0x81, 0x0C), "untested")):
+            writes = []
+            with self.subTest(reg=reg):
+                with self.assertRaisesRegex(toppingctl.Refused, why):
+                    devstate.dx1_query(_make_fake_hid(writes)(), *reg)
+                self.assertEqual(writes, [])
 
     def test_dx1_query_refuses_the_writing_registers_before_writing(self):
         for reg in toppingctl.DX1_READ_WRITES:
@@ -1079,6 +1110,15 @@ class Dx1StateSkipPeqDumpTest(unittest.TestCase):
         st, sent = self.read()
         self.assertIn((0x11, 0x06), sent)
         self.assertEqual(st["configs"], [])
+
+    def test_neither_mode_sends_the_balance_registers(self):
+        # #43: a readNack to 81 0b reset the analog balance; 81 0c is untested.
+        for skip in (True, False):
+            with self.subTest(skip_peq_dump=skip):
+                _, sent = self.read(skip_peq_dump=skip)
+                self.assertTrue(sent)
+                self.assertNotIn((0x81, 0x0B), sent)
+                self.assertNotIn((0x81, 0x0C), sent)
 
     def test_show_says_the_dump_was_not_read(self):
         st = {"block": {}, "regs": {}, "configs": None}
