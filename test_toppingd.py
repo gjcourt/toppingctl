@@ -411,7 +411,9 @@ class RoutesTest(AgentTestCase):
         for path in ("/v1/room", "/v1/state", "/v1/state?fresh=1"):
             self.assertEqual(self.get(path)[0], 200)
         for on in (True, False):
-            status, plan = self.send("/v1/plans", {"op": "gain.set", "args": {"on": on}})
+            status, plan = self.send(
+                "/v1/plans", {"op": "gain.set", "args": {"on": on}, "expected": {"gain": "low"}}
+            )
             self.assertEqual(status, 200)
             self.assertEqual(
                 self.send(f"/v1/plans/{plan['plan_id']}/send", {"allow_loud": on})[0], 200
@@ -437,7 +439,9 @@ class RoutesTest(AgentTestCase):
         # Plans: created, sent (with and without allow_loud), 409-rejected
         # after the fake DAC's gain moves, and cancelled.
         pids = [
-            self.send("/v1/plans", {"op": "gain.set", "args": {"on": on}})[1]["plan_id"]
+            self.send(
+                "/v1/plans", {"op": "gain.set", "args": {"on": on}, "expected": {"gain": "low"}}
+            )[1]["plan_id"]
             for on in (True, True, False, True, True)
         ]
         self.assertEqual(self.send(f"/v1/plans/{pids[0]}/send", {"allow_loud": True})[0], 200)
@@ -1293,8 +1297,17 @@ class PlanTestCase(AgentTestCase):
         # 31 (sampleRate) moves with playback and no plan depends on it.
         self.dac.records = {0: 1, 9: 30, 12: 1, 13: 0, 31: 44100, 32: 1}
 
-    def plan(self, on=True, **extra):
-        return self.send("/v1/plans", {"op": "gain.set", "args": {"on": on}, **extra})
+    def plan(self, on=True, expected=None, **extra):
+        body = {
+            "op": "gain.set",
+            "args": {"on": on},
+            "expected": expected or {"gain": self.shown()},
+        }
+        return self.send("/v1/plans", {**body, **extra})
+
+    def shown(self):
+        """The gain the UI last showed: what the fake DAC reads now."""
+        return "high" if self.dac.records.get(13) else "low"
 
     def make(self, on=True):
         status, out = self.plan(on)
@@ -1359,29 +1372,61 @@ class PlanCreateTest(PlanTestCase):
     def test_expected_is_compared_with_the_read(self):
         ok = {"gain": "low", "volume_db": -30, "power": "on", "output": "hp_all"}
         self.assertEqual(self.plan(expected=ok)[0], 200)
-        for name, value in (("gain", "high"), ("volume_db", -29), ("volume_db", -30.4)):
+        for name, value in (
+            ("gain", "high"),
+            ("volume_db", -29),
+            ("volume_db", -30.4),
+            ("power", "off"),
+            ("output", "all"),
+        ):
             with self.subTest(name=name, value=value):
-                status, out = self.plan(expected={name: value})
+                status, out = self.plan(expected={**ok, name: value})
                 self.assertEqual((status, out["error"]), (409, "changed"))
                 self.assertEqual(out["state"]["status"], "read")
         self.assertEqual(len(self.agent._plans), 1)
         self.assert_no_write_sent()
 
     def test_bad_requests_open_nothing(self):
-        cases = [
-            {},
-            {"op": 7},
-            {"op": "gain.set"},
-            {"op": "gain.set", "args": {"on": 1}},
-            {"op": "gain.set", "args": {"on": True, "x": 1}},
-            {"op": "gain.set", "args": {"on": True}, "expected": []},
-            {"op": "gain.set", "args": {"on": True}, "expected": {"sampleRate": 1}},
-            {"op": "gain.set", "args": {"on": True}, "expected": {"gain": 1}},
-            {"op": "gain.set", "args": {"on": True}, "frames": ["71 0b"]},
-            {"op": "gain.set", "args": {"on": True}, "allow_loud": True},
-            {"op": "raw", "args": {"frame": "22 33 20"}},
-            [],
-        ]
+        cases = (
+            [
+                {},
+                {"op": 7},
+                {"op": "gain.set"},
+                {"op": "gain.set", "args": {"on": 1}, "expected": {"gain": "low"}},
+                {"op": "gain.set", "args": {"on": True, "x": 1}, "expected": {"gain": "low"}},
+                {"op": "gain.set", "args": {"on": True}},
+                {"op": "gain.set", "args": {"on": True}, "expected": {}},
+                {"op": "gain.set", "args": {"on": True}, "expected": {"volume_db": -30}},
+                {"op": "gain.set", "args": {"on": True}, "expected": []},
+                {
+                    "op": "gain.set",
+                    "args": {"on": True},
+                    "expected": {"gain": "low", "sampleRate": 1},
+                },
+                {"op": "gain.set", "args": {"on": True}, "expected": {"gain": 1}},
+                {
+                    "op": "gain.set",
+                    "args": {"on": True},
+                    "expected": {"gain": "low", "frames": ["71 0b"]},
+                },
+            ]
+            + [
+                {
+                    "op": "gain.set",
+                    "args": {"on": True},
+                    "expected": {"gain": "low", "volume_db": v},
+                }
+                for v in ("-30", True, None, 3, 10**400)
+            ]
+            + [
+                {"op": "gain.set", "args": {"on": True}, "expected": {"gain": "low"}, **extra}
+                for extra in ({"frames": ["71 0b"]}, {"allow_loud": True})
+            ]
+            + [
+                {"op": "raw", "args": {"frame": "22 33 20"}},
+                [],
+            ]
+        )
         for body in cases:
             with self.subTest(body=body):
                 status, out = self.send("/v1/plans", body)
@@ -1484,6 +1529,39 @@ class PlanSendTest(PlanTestCase):
         self.assertEqual((status, out["error"]), (410, "plan_expired"))
         self.assertEqual(self.send_plan(pid, allow_loud=True)[0], 404)
 
+    def test_expiry_is_checked_when_the_frames_would_go(self):
+        # The Send arrives inside the 60 s; the read ends after it.
+        pid = self.make()
+        self.clock[0] += 59.9
+        read = devstate.read_settings
+
+        def slow_read(*a, **kw):
+            self.clock[0] += 0.2
+            return read(*a, **kw)
+
+        with mock.patch.object(devstate, "read_settings", slow_read):
+            status, out = self.send_plan(pid, allow_loud=True)
+        self.assertEqual((status, out["error"]), (410, "plan_expired"))
+
+    def test_cancelling_an_expired_plan_discards_nothing(self):
+        pid = self.make()
+        self.clock[0] += 60
+        self.assertEqual(self.cancel(pid), (200, {"plan_id": pid, "discarded": False}))
+
+    def test_two_sends_of_one_plan(self):
+        pid = self.make()
+        results = []
+        threads = [
+            threading.Thread(target=lambda: results.append(self.send_plan(pid, allow_loud=True)[0]))
+            for _ in range(2)
+        ]
+        with mock.patch.object(toppingd, "AGENT_LOCK_WAIT", 2.0):
+            for th in threads:
+                th.start()
+            for th in threads:
+                th.join()
+        self.assertEqual(sorted(results), [200, 404])
+
     def test_expired_plans_are_pruned(self):
         self.make()
         self.clock[0] += 61
@@ -1525,7 +1603,7 @@ class PlanSendTest(PlanTestCase):
         self.dac.records[40] = 3  # some other field nobody depends on
         self.assertEqual(self.send_plan(pid, allow_loud=True)[0], 200)
 
-    def test_a_dac_that_disappears_or_changes_model(self):
+    def test_a_dac_that_disappears(self):
         pid = self.make()
         with mock.patch.object(toppingctl.hid, "enumerate", _enumerate()):
             status, out = self.send_plan(pid, allow_loud=True)
@@ -1589,6 +1667,7 @@ class PlanModelTest(PlanTestCase):
 
     def check_refused(self, error, http=403, **body):
         body = body or {"op": "gain.set", "args": {"on": True}}
+        body.setdefault("expected", {"gain": "low"})
         status, out = self.send("/v1/plans", body)
         self.assertEqual((status, out["error"]), (http, error))
         self.assertNotIn("frames", out)

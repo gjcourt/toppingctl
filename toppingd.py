@@ -20,19 +20,25 @@ refuses any frame that is not a readNack in CONFIRMED_READS for the model.
                              the fresh read is louder than the target
     POST /v1/unlocks         {} -> {unlock_id, expires_at}: 60 s above -10 dB
     DELETE /v1/unlocks/{id}  discards an unlock
-    POST /v1/plans           {op, args, expected?}: reads the device, builds
-                             and checks the frames, and returns {plan_id,
+    POST /v1/plans           {op, args, expected}: reads the device, checks
+                             expected against it (409 changed), builds and
+                             checks the frames, and returns {plan_id,
                              summary, before, after_predicted, frames,
                              needs_unlock, expires_at}. Only op gain.set,
-                             args {on: bool}, exists; gain on needs_unlock
+                             args {on: bool}, exists; expected names at
+                             least gain; gain on needs_unlock
     POST /v1/plans/{id}/send {allow_loud?}: re-reads; 409 changed if power,
                              volume, volumeStep, gain or output moved since
                              the plan; gain on needs allow_loud: true. Returns
                              the planned frames, sent: false
     POST /v1/plans/{id}/cancel  {}: discards the plan
 
-A plan is single-use: Send (whatever its outcome), Cancel, a 409, or 60 s
-after it was made each discard it. Plans live in memory only.
+A plan is single-use: Send (whatever its outcome, a refusal for allow_loud,
+a 423 or a 503 included), Cancel, a 409, or 60 s after it was made each
+discard it. Plans live in memory only. Plan refusals: 403 op_unavailable
+(an op this build doesn't have), 403 model_unverified, 403 unlock_required,
+404 plan_unknown (unknown, sent, cancelled or 409'd), 410 plan_expired,
+409 changed, 423 busy and 503 when the read can't anchor the plan.
 
 Undo is a volume write: POST /v1/volume with the undo token's target_db and
 expected_db (the plan's "Undo of a volume change is a volume write").
@@ -627,13 +633,15 @@ def _plan_before(rec):
     }
 
 
-def _expected(value):
-    """A plan's optional `expected`: the fields the UI showed, in /v1/state's
-    vocabulary, which the plan's read must match."""
-    if value is None:
-        return {}
-    if not isinstance(value, dict):
-        raise BadRequest("expected must be an object of the fields the UI showed")
+def _expected(value, needs):
+    """A plan's `expected`: the fields the UI showed, in /v1/state's
+    vocabulary, which the plan's read must match. "Every write carries
+    expected" (the plan's writers table), so it must name at least `needs`,
+    the field the op changes."""
+    if not isinstance(value, dict) or needs not in value:
+        raise BadRequest(
+            f"expected must be an object of the fields the UI showed, with at least {needs}"
+        )
     extra = set(value) - EXPECTED_KEYS
     if extra:
         raise BadRequest(
@@ -642,7 +650,7 @@ def _expected(value):
         )
     for name, v in value.items():
         if name == "volume_db":
-            _number(value, name)
+            _number({f"expected.{name}": v}, f"expected.{name}")
         elif not isinstance(v, str):
             raise BadRequest(f"expected.{name} must be a string, as /v1/state reports it")
     return value
@@ -903,7 +911,7 @@ class Agent:
     # --- plans ----------------------------------------------------------------
 
     def create_plan(self, body):
-        """POST /v1/plans {op, args, expected?}: the first phase of every write
+        """POST /v1/plans {op, args, expected}: the first phase of every write
         but volume. The op is checked before anything is opened, so an op not
         in this build is refused on every model. Then the device is read and
         the frames built and checked under one lock and open. Sends nothing."""
@@ -924,7 +932,7 @@ class Agent:
         args = body.get("args")
         if not (isinstance(args, dict) and set(args) == {"on"} and isinstance(args["on"], bool)):
             raise BadRequest('gain.set takes args {"on": true} or {"on": false}')
-        expected = _expected(body.get("expected"))
+        expected = _expected(body.get("expected"), "gain")
         on = args["on"]
         dac, key, refused = self._plan_target()
         if refused:
@@ -1068,7 +1076,7 @@ class Agent:
         dac, key, refused = self._plan_target()
         if refused:
             return refused
-        if key != plan["key"]:
+        if key != plan["key"]:  # defensive: only the DX5 II plans gain today
             return 409, {
                 "error": "changed",
                 "reason": f"a {DEVICES[key]['name']} is attached, not the DAC this plan read",
@@ -1077,6 +1085,10 @@ class Agent:
         return self._plan_result(status, st, decided)
 
     def _send_decision(self, pid, plan, rec):
+        # Checked again here, when the frames would go, not only when the
+        # Send arrived: the lock wait and the read take time.
+        if self.now() >= plan["expires"]:
+            return 410, {"error": "plan_expired", "reason": f"the plan expired ({PLAN_SECS} s)"}
         before = _plan_before(rec)
         if isinstance(before, str):
             return 503, {"error": "read_failed", "reason": before}
@@ -1107,7 +1119,8 @@ class Agent:
         """POST /v1/plans/{id}/cancel. Cancelling an unknown or expired plan
         is not an error, as with unlocks."""
         with self._plans_mu:
-            found = self._plans.pop(pid, None) is not None
+            plan = self._plans.pop(pid, None)
+        found = plan is not None and self.now() < plan["expires"]
         return 200, {"plan_id": pid, "discarded": found}
 
     def _base(self, dac, status, **extra):
