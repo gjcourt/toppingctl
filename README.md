@@ -89,7 +89,7 @@ USB PID — see `DEVICES` in [`toppingctl.py`](toppingctl.py) and the protocol s
 linked from [AGENTS.md](AGENTS.md) for the full register map. A handful of
 standalone scripts cover the rest of the protocol: `readsettings.py` queries live
 device state instead of the tool's local write cache, `listen.py` sends a raw read
-for any register, `meters.py` prints the unsolicited VU/FFT pushes, `scenes.py`
+for any register (on the DX1 II, only those in `CONFIRMED_READS`), `meters.py` prints the unsolicited VU/FFT pushes, `scenes.py`
 recalls a stored C1/C2 scene (C1–C3 on the DX1 II), `setctl.py` sets one named field with a read-verify
 round trip, and `probe.py` sends one raw register write for mapping an unknown
 enum. Each takes `--help`.
