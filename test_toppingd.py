@@ -1301,7 +1301,7 @@ class PlanTestCase(AgentTestCase):
         body = {
             "op": "gain.set",
             "args": {"on": on},
-            "expected": expected or {"gain": self.shown()},
+            "expected": {"gain": self.shown()} if expected is None else expected,
         }
         return self.send("/v1/plans", {**body, **extra})
 
@@ -1542,6 +1542,7 @@ class PlanSendTest(PlanTestCase):
         with mock.patch.object(devstate, "read_settings", slow_read):
             status, out = self.send_plan(pid, allow_loud=True)
         self.assertEqual((status, out["error"]), (410, "plan_expired"))
+        self.assertEqual(self.send_plan(pid, allow_loud=True)[0], 404)
 
     def test_cancelling_an_expired_plan_discards_nothing(self):
         pid = self.make()
@@ -1549,18 +1550,26 @@ class PlanSendTest(PlanTestCase):
         self.assertEqual(self.cancel(pid), (200, {"plan_id": pid, "discarded": False}))
 
     def test_two_sends_of_one_plan(self):
+        # The second Send arrives while the first is inside its read.
         pid = self.make()
-        results = []
-        threads = [
-            threading.Thread(target=lambda: results.append(self.send_plan(pid, allow_loud=True)[0]))
-            for _ in range(2)
-        ]
-        with mock.patch.object(toppingd, "AGENT_LOCK_WAIT", 2.0):
-            for th in threads:
-                th.start()
-            for th in threads:
-                th.join()
-        self.assertEqual(sorted(results), [200, 404])
+        reading, results = threading.Event(), []
+        read = devstate.read_settings
+
+        def slow_read(*a, **kw):
+            reading.set()
+            time.sleep(0.3)
+            return read(*a, **kw)
+
+        def send():
+            results.append(self.send_plan(pid, allow_loud=True)[0])
+
+        with mock.patch.object(devstate, "read_settings", slow_read):
+            first = threading.Thread(target=send)
+            first.start()
+            self.assertTrue(reading.wait(5))
+            send()
+            first.join()
+        self.assertEqual(results, [404, 200])
 
     def test_expired_plans_are_pruned(self):
         self.make()

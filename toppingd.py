@@ -35,10 +35,11 @@ refuses any frame that is not a readNack in CONFIRMED_READS for the model.
 
 A plan is single-use: Send (whatever its outcome, a refusal for allow_loud,
 a 423 or a 503 included), Cancel, a 409, or 60 s after it was made each
-discard it. Plans live in memory only. Plan refusals: 403 op_unavailable
-(an op this build doesn't have), 403 model_unverified, 403 unlock_required,
-404 plan_unknown (unknown, sent, cancelled or 409'd), 410 plan_expired,
-409 changed, 423 busy and 503 when the read can't anchor the plan.
+discard it. Plans live in memory only. Plan refusals: 400 bad_request,
+403 op_unavailable (an op this build doesn't have), 403 model_unverified,
+403 unlock_required, 403 refused (the write gate), 404 plan_unknown (no such
+plan, or one already used or cancelled), 410 plan_expired, 409 changed,
+423 busy, and 503 when the read can't anchor the plan.
 
 Undo is a volume write: POST /v1/volume with the undo token's target_db and
 expected_db (the plan's "Undo of a volume change is a volume write").
@@ -1088,7 +1089,10 @@ class Agent:
         # Checked again here, when the frames would go, not only when the
         # Send arrived: the lock wait and the read take time.
         if self.now() >= plan["expires"]:
-            return 410, {"error": "plan_expired", "reason": f"the plan expired ({PLAN_SECS} s)"}
+            return 410, {
+                "error": "plan_expired",
+                "reason": f"the plan expired ({PLAN_SECS} s); make a new one",
+            }
         before = _plan_before(rec)
         if isinstance(before, str):
             return 503, {"error": "read_failed", "reason": before}
