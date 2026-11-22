@@ -16,13 +16,23 @@ Usage:
     ./listen.py --secs 30 --raw        # longer, show undecodable frames too
 
 Sends nothing except readNack, which is what the vendor app itself issues.
+On a dx1-protocol model (DX1 II) only a readNack in CONFIRMED_READS is sent:
+anywhere else that "read" can write the register (devstate.dx1_query).
 """
 
 import argparse
 import sys
 import time
 
-from toppingctl import cli_device_lock, frame, open_checked
+from toppingctl import (
+    CONFIRMED_READS,
+    DEVICES,
+    DX1_READ_WRITES,
+    DX1_VENDOR_UNREAD,
+    cli_device_lock,
+    frame,
+    open_checked,
+)
 from vendor_commands import COMMANDS, PROTOCOL
 
 READ_NACK = 0x10
@@ -73,15 +83,39 @@ def main():
         listen(a)
 
 
-def listen(a):
-    h = open_checked(a.device)
+def refuse_dx1(dev_key, reg, sub):
+    """Why a readNack to (reg, sub) is refused on a dx1-protocol model, or None.
 
+    On the DX1 II a readNack is only a read for the vendor's read-safe list,
+    and not all of that: anywhere else the device WRITES the data field (see
+    devstate.dx1_query). So only CONFIRMED_READS for the model gets through."""
+    if (reg, sub) in CONFIRMED_READS.get(dev_key, ()):
+        return None
+    if (reg, sub) in DX1_READ_WRITES:
+        why = "on the vendor's read-safe list, but measured writing its data field (#32, #43)"
+    elif (reg, sub) in DX1_VENDOR_UNREAD:
+        why = "on the vendor's read-safe list, but never read by the vendor app and untested (#43)"
+    else:
+        why = "not in CONFIRMED_READS, and on this model a readNack there can WRITE its data field"
+    return f"refusing a {dev_key} readNack to {reg:02x} {sub:02x}: {why}"
+
+
+def listen(a):
+    cmd = None
     if a.read:
         cmd = resolve(a.read)
         name = COMMANDS.get(cmd, "?")
         if name in NEVER:
-            h.close()
             sys.exit(f"refusing to address {name}: not worth the risk from a probe")
+        if DEVICES[a.device].get("protocol") == "dx1":
+            why = refuse_dx1(a.device, cmd >> 8, cmd & 0xFF)
+            if why:
+                sys.exit(why)
+
+    # Opened only once the read is known to be allowed: a refusal sends nothing.
+    h = open_checked(a.device)
+
+    if cmd is not None:
         reg, sub = cmd >> 8, cmd & 0xFF
         print(f"-> readNack  0x{cmd:04x}  {name}")
         h.write(frame(reg, sub, 0, opcode=READ_NACK))
