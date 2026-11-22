@@ -10,6 +10,7 @@ from toppingctl import (
     DX1_READ_REGS,
     DX1_READ_WRITES,
     DX1_REG_PEQ_DUMP,
+    DX1_VENDOR_UNREAD,
     GET_SETTINGS,
     Refused,
     frame,
@@ -88,6 +89,12 @@ def dx1_query(h, reg, sub, secs=0.7):
     0x7900 (autoStandby) and 0x7d00 (autoScreenOff), which are on that list
     but were measured writing anyway: a readNack with data 0 set both from
     "Never" to their shortest timeout (toppingctl.DX1_READ_WRITES, #32).
+    0x810b (analogBalance) is in DX1_READ_WRITES too: a readNack with data 0
+    reset the balance from L 3.0 dB to centre (#43, firmware 16.19.23.19).
+    0x810c (optBalance) is also left out (toppingctl.DX1_VENDOR_UNREAD): it
+    shares 0x810b's encoding and the vendor app never sends it a readNack
+    (#43's capture), but it is untested -- it was at centre, so a write of 0
+    could not be seen.
     0x1106, the 3-slot PEQ dump (dx1_read_configs, DX1_REG_PEQ_DUMP), is
     queried too, but it is NOT on the vendor's requestGroup list -- it is
     read on the strength of one contributor's unmeasured claim ("already
@@ -99,12 +106,17 @@ def dx1_query(h, reg, sub, secs=0.7):
     state arrives as an unsolicited push after it changes.
 
     So this refuses, before writing anything, any register outside
-    toppingctl.DX1_READ_REGS (that list, minus those two, plus 0x1106).
+    toppingctl.DX1_READ_REGS (that list, minus those four, plus 0x1106).
     """
     if (reg, sub) in DX1_READ_WRITES:
         raise Refused(
             f"refusing a dx1 readNack to {reg:02x} {sub:02x}: on the vendor's "
-            "read-safe list, but measured writing its data field on hardware (#32)."
+            "read-safe list, but measured writing its data field on hardware (#32, #43)."
+        )
+    if (reg, sub) in DX1_VENDOR_UNREAD:
+        raise Refused(
+            f"refusing a dx1 readNack to {reg:02x} {sub:02x}: on the vendor's "
+            "read-safe list, but the vendor app never reads it and it is untested (#43)."
         )
     if (reg, sub) not in DX1_READ_REGS:
         raise Refused(
@@ -140,12 +152,12 @@ def dx1_read_configs(h, secs=4.5):
 # The registers dx1_state queries one at a time, by the names readsettings
 # decodes. Every key is on toppingctl.DX1_READ_REGS (a test holds that);
 # 0x810a comes from dx1_read_block instead, and 0x810d is allowed but not
-# read. autoStandby (0x7900) and autoScreenOff (0x7d00) are on the vendor list
-# but absent here: a readNack to either reset it on hardware (#32).
+# read. autoStandby (0x7900), autoScreenOff (0x7d00) and analogBalance
+# (0x810b) are on the vendor list but absent here: a readNack to any of them
+# reset it on hardware (#32, #43). optBalance (0x810c) is absent too: untested,
+# and the vendor app never reads it (#43).
 DX1_STATE_QUERIES = {
     (0x71, 0x00): "state",
-    (0x81, 0x0B): "analogBalance",
-    (0x81, 0x0C): "optBalance",
     (0x81, 0x0E): "remoteArrow",
     (0x81, 0x0F): "remoteMute",
     (0x82, 0x00): "knobSingle",
@@ -161,8 +173,9 @@ def dx1_state(dev_key="dx1ii", *, skip_peq_dump=False, h=None):
     readsettings. Queries are restricted to the vendor's read-safe register
     list (DX1_VENDOR_READ_SAFE; see dx1_query -- anything else turns the
     readNack into a write of the data field and clobbers the user's
-    settings), minus the two on it that write anyway (DX1_READ_WRITES),
-    plus the unverified 0x1106 dump. The write-only registers
+    settings), minus the three on it that write anyway (DX1_READ_WRITES)
+    and 0x810c, which the vendor app never reads (DX1_VENDOR_UNREAD), plus
+    the unverified 0x1106 dump. The write-only registers
     (gain, filter, brightness, input, display mode, ...) are deliberately
     absent: their state only arrives as an unsolicited push.
 

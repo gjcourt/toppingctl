@@ -661,6 +661,9 @@ class Dx1StateTest(AgentTestCase):
             self.assertEqual(opcode, 0x10)
             self.assertIn((reg, sub), toppingctl.CONFIRMED_READS["dx1ii"])
         self.assertNotIn((0x10, 0x11, 0x06), sent)
+        # #43: 81 0b resets the analog balance; 81 0c is untested.
+        self.assertNotIn((0x10, 0x81, 0x0B), sent)
+        self.assertNotIn((0x10, 0x81, 0x0C), sent)
         for data in self.dac.writes:
             self.assertEqual(data[0], 0, "dx1 frames carry report id 0")
 
