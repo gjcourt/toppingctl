@@ -385,6 +385,8 @@ class RoutesTest(AgentTestCase):
 
     def setUp(self):
         super().setUp()
+        # Every field a plan depends on, so the plan routes get past the read.
+        self.dac.records = {0: 1, 9: 30, 12: 1, 13: 0, 32: 1}
         self.start()
 
     def test_unknown_routes_and_methods(self):
@@ -396,7 +398,7 @@ class RoutesTest(AgentTestCase):
             ("DELETE", "/v1/unlocks"),
             ("GET", "/v1/unlocks/" + "a" * 32),
         ]
-        cases += [(m, "/v1/plans") for m in ("GET", "POST")]
+        cases += [(m, "/v1/plans") for m in ("GET", "PUT", "DELETE")]
         cases += [("DELETE", "/v1/unlocks/short"), ("POST", "/v1/plans/x/send")]
         for method, path in cases:
             with self.subTest(method=method, path=path):
@@ -408,6 +410,16 @@ class RoutesTest(AgentTestCase):
     def test_every_route_sends_only_confirmed_readnacks(self):
         for path in ("/v1/room", "/v1/state", "/v1/state?fresh=1"):
             self.assertEqual(self.get(path)[0], 200)
+        for on in (True, False):
+            status, plan = self.send(
+                "/v1/plans", {"op": "gain.set", "args": {"on": on}, "expected": {"gain": "low"}}
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(
+                self.send(f"/v1/plans/{plan['plan_id']}/send", {"allow_loud": on})[0], 200
+            )
+        for op in sorted(toppingd.OPS_NOT_IN_BUILD):
+            self.assertEqual(self.send("/v1/plans", {"op": op, "args": {}})[0], 403)
         self.assertEqual(set(self.readnacks()), {(0x10, 0x71, 0x0C)})
 
     def test_no_route_sends_a_write_in_dry_run(self):
@@ -424,6 +436,20 @@ class RoutesTest(AgentTestCase):
         for method, path, body in calls:
             with self.subTest(method=method, path=path):
                 self.assertIn(self.send(path, body, method=method)[0], (200, 409))
+        # Plans: created, sent (with and without allow_loud), 409-rejected
+        # after the fake DAC's gain moves, and cancelled.
+        pids = [
+            self.send(
+                "/v1/plans", {"op": "gain.set", "args": {"on": on}, "expected": {"gain": "low"}}
+            )[1]["plan_id"]
+            for on in (True, True, False, True, True)
+        ]
+        self.assertEqual(self.send(f"/v1/plans/{pids[0]}/send", {"allow_loud": True})[0], 200)
+        self.assertEqual(self.send(f"/v1/plans/{pids[1]}/send", {})[0], 403)
+        self.assertEqual(self.send(f"/v1/plans/{pids[2]}/send", {})[0], 200)
+        self.assertEqual(self.send(f"/v1/plans/{pids[3]}/cancel", {})[0], 200)
+        self.dac.records[13] = 1
+        self.assertEqual(self.send(f"/v1/plans/{pids[4]}/send", {"allow_loud": True})[0], 409)
         self.assertEqual(set(self.readnacks()), {(0x10, 0x71, 0x0C)})
 
 
@@ -1255,6 +1281,443 @@ class LowerTest(VolumeTestCase):
             status, out = self.lower()
         self.assertEqual((status, out["error"]), (403, "model_unverified"))
         self.assertEqual(self.dac.opens, 0)
+
+
+def _gain_frame(on):
+    return toppingctl.frame(0x71, 0x17, 1 if on else 0).hex(" ")
+
+
+COMMIT = toppingctl.frame(0x71, 0x34, 1).hex(" ")
+
+
+class PlanTestCase(AgentTestCase):
+    """A DX5 II whose GetSettings read has every field a plan depends on:
+    powered, -30 dB on one_db, output hp_all, low gain, and a sample rate."""
+
+    def setUp(self):
+        super().setUp()
+        # 0 powered, 9 volume, 12 outputType, 13 highGain, 32 volumeStep;
+        # 31 (sampleRate) moves with playback and no plan depends on it.
+        self.dac.records = {0: 1, 9: 30, 12: 1, 13: 0, 31: 44100, 32: 1}
+
+    def plan(self, on=True, expected=None, **extra):
+        body = {
+            "op": "gain.set",
+            "args": {"on": on},
+            "expected": {"gain": self.shown()} if expected is None else expected,
+        }
+        return self.send("/v1/plans", {**body, **extra})
+
+    def shown(self):
+        """The gain the UI last showed: what the fake DAC reads now."""
+        return "high" if self.dac.records.get(13) else "low"
+
+    def make(self, on=True):
+        status, out = self.plan(on)
+        self.assertEqual(status, 200, out)
+        return out["plan_id"]
+
+    def send_plan(self, pid, **body):
+        return self.send(f"/v1/plans/{pid}/send", body)
+
+    def cancel(self, pid):
+        return self.send(f"/v1/plans/{pid}/cancel", {})
+
+    def assert_no_write_sent(self):
+        self.assertTrue(self.readnacks(), "expected the operation to read the device")
+        self.assertEqual(set(self.readnacks()), {(0x10, 0x71, 0x0C)})
+
+
+class PlanCreateTest(PlanTestCase):
+    def setUp(self):
+        super().setUp()
+        self.start()
+
+    def test_create_returns_the_frames_and_sends_nothing(self):
+        status, out = self.plan(True)
+        self.assertEqual(status, 200)
+        self.assertEqual(out["mode"], "dry-run")
+        self.assertRegex(out["plan_id"], toppingd.UNLOCK_ID)
+        before = {
+            "power": "on",
+            "volume": {"db": -30.0, "raw": 30, "volume_step_db": 1.0},
+            "gain": "low",
+            "output": "hp_all",
+        }
+        self.assertEqual(out["before"], before)
+        self.assertEqual(out["after_predicted"], {**before, "gain": "high"})
+        self.assertEqual([f["hex"] for f in out["frames"]], [_gain_frame(True), COMMIT])
+        self.assertEqual(
+            [f["hex"] for f in out["frames"]],
+            [f.data.hex(" ") for f in toppingctl.plan_gain(DX5, True)],
+        )
+        self.assertTrue(out["needs_unlock"])
+        self.assertEqual(out["expires_at"], toppingd._iso(self.clock[0] + 60))
+        self.assertEqual(out["summary"], "gain low to high")
+        self.assertNotIn("sent", out)
+        self.assertEqual(self.readnacks(), [(0x10, 0x71, 0x0C)])
+        self.assertEqual((self.dac.opens, self.dac.closes), (1, 1))
+
+    def test_gain_off_needs_no_unlock(self):
+        self.dac.records[13] = 1
+        status, out = self.plan(False)
+        self.assertEqual(status, 200)
+        self.assertFalse(out["needs_unlock"])
+        self.assertEqual([f["hex"] for f in out["frames"]], [_gain_frame(False), COMMIT])
+        self.assertEqual(out["after_predicted"]["gain"], "low")
+
+    def test_gain_on_needs_the_unlock_even_when_already_high(self):
+        self.dac.records[13] = 1
+        status, out = self.plan(True)
+        self.assertTrue(out["needs_unlock"])
+        self.assertIn("no change", out["summary"])
+
+    def test_expected_is_compared_with_the_read(self):
+        ok = {"gain": "low", "volume_db": -30, "power": "on", "output": "hp_all"}
+        self.assertEqual(self.plan(expected=ok)[0], 200)
+        for name, value in (
+            ("gain", "high"),
+            ("volume_db", -29),
+            ("volume_db", -30.4),
+            ("power", "off"),
+            ("output", "all"),
+        ):
+            with self.subTest(name=name, value=value):
+                status, out = self.plan(expected={**ok, name: value})
+                self.assertEqual((status, out["error"]), (409, "changed"))
+                self.assertEqual(out["state"]["status"], "read")
+        self.assertEqual(len(self.agent._plans), 1)
+        self.assert_no_write_sent()
+
+    def test_bad_requests_open_nothing(self):
+        cases = (
+            [
+                {},
+                {"op": 7},
+                {"op": "gain.set"},
+                {"op": "gain.set", "args": {"on": 1}, "expected": {"gain": "low"}},
+                {"op": "gain.set", "args": {"on": True, "x": 1}, "expected": {"gain": "low"}},
+                {"op": "gain.set", "args": {"on": True}},
+                {"op": "gain.set", "args": {"on": True}, "expected": {}},
+                {"op": "gain.set", "args": {"on": True}, "expected": {"volume_db": -30}},
+                {"op": "gain.set", "args": {"on": True}, "expected": []},
+                {
+                    "op": "gain.set",
+                    "args": {"on": True},
+                    "expected": {"gain": "low", "sampleRate": 1},
+                },
+                {"op": "gain.set", "args": {"on": True}, "expected": {"gain": 1}},
+                {
+                    "op": "gain.set",
+                    "args": {"on": True},
+                    "expected": {"gain": "low", "frames": ["71 0b"]},
+                },
+            ]
+            + [
+                {
+                    "op": "gain.set",
+                    "args": {"on": True},
+                    "expected": {"gain": "low", "volume_db": v},
+                }
+                for v in ("-30", True, None, 3, 10**400)
+            ]
+            + [
+                {"op": "gain.set", "args": {"on": True}, "expected": {"gain": "low"}, **extra}
+                for extra in ({"frames": ["71 0b"]}, {"allow_loud": True})
+            ]
+            + [
+                {"op": "raw", "args": {"frame": "22 33 20"}},
+                [],
+            ]
+        )
+        for body in cases:
+            with self.subTest(body=body):
+                status, out = self.send("/v1/plans", body)
+                self.assertEqual((status, out["error"]), (400, "bad_request"))
+        self.assertEqual(self.call("/v1/plans", method="POST", body=b"nope")[0], 400)
+        self.assertEqual((self.dac.opens, self.agent._plans), (0, {}))
+
+    def test_a_read_that_cant_anchor_the_plan_is_503(self):
+        for missing in (0, 9, 12, 13, 32):
+            with self.subTest(missing=missing):
+                self.dac.records = {0: 1, 9: 30, 12: 1, 13: 0, 32: 1}
+                del self.dac.records[missing]
+                status, out = self.plan()
+                self.assertEqual((status, out["error"]), (503, "read_failed"))
+                self.assertIn(toppingd.SETTINGS_FIELDS[missing], out["reason"])
+        self.dac.records = {}
+        self.assertEqual(self.plan()[0], 503)
+        self.assertEqual(self.agent._plans, {})
+
+    def test_busy_agent_is_423(self):
+        self.agent._hid.acquire()
+        self.addCleanup(self.agent._hid.release)
+        status, out = self.plan()
+        self.assertEqual((status, out["error"]), (423, "busy"))
+        self.assertEqual(self.dac.opens, 0)
+
+    def test_cli_holding_the_lock_is_423_within_the_wait(self):
+        pid = self.make()
+        fd = os.open(os.path.join(self.lockdir, "device.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)  # another open file: conflicts as a CLI would
+        os.pwrite(fd, f"toppingctl {os.getpid()}\n".encode(), 0)
+        for name, call in (
+            ("create", self.plan),
+            ("send", lambda: self.send_plan(pid, allow_loud=True)),
+        ):
+            with self.subTest(name), mock.patch.object(toppingd, "AGENT_LOCK_WAIT", 2.0):
+                t0 = time.monotonic()
+                status, out = call()
+                self.assertLess(time.monotonic() - t0, 2.5)
+                self.assertEqual((status, out["error"]), (423, "busy"))
+                self.assertIn(f"pid {os.getpid()}", out["state"]["holder"])
+        self.assertEqual(self.dac.opens, 1)  # the first plan's read only
+
+
+class PlanSendTest(PlanTestCase):
+    def setUp(self):
+        super().setUp()
+        self.start()
+
+    def test_gain_on_needs_allow_loud(self):
+        status, out = self.send_plan(self.make(True))
+        self.assertEqual((status, out["error"]), (403, "unlock_required"))
+        self.assertIn("allow_loud", out["reason"])
+        status, out = self.send_plan(self.make(True), allow_loud=False)
+        self.assertEqual(status, 403)
+        status, out = self.send_plan(self.make(True), allow_loud=True)
+        self.assertEqual(status, 200)
+        self.assertEqual((out["mode"], out["sent"]), ("dry-run", False))
+        self.assertEqual([f["hex"] for f in out["frames"]], [_gain_frame(True), COMMIT])
+        self.assertEqual(out["after_predicted"]["gain"], "high")
+        self.assert_no_write_sent()
+
+    def test_gain_off_needs_no_allow_loud(self):
+        self.dac.records[13] = 1
+        status, out = self.send_plan(self.make(False))
+        self.assertEqual((status, out["sent"]), (200, False))
+        self.assertEqual(out["frames"][0]["hex"], _gain_frame(False))
+        self.assertEqual(self.send_plan(self.make(False), allow_loud=True)[0], 200)
+        self.assert_no_write_sent()
+
+    def test_already_sent_plan_is_refused(self):
+        pid = self.make()
+        self.assertEqual(self.send_plan(pid, allow_loud=True)[0], 200)
+        status, out = self.send_plan(pid, allow_loud=True)
+        self.assertEqual((status, out["error"]), (404, "plan_unknown"))
+
+    def test_send_refused_for_allow_loud_still_uses_the_plan(self):
+        pid = self.make()
+        self.assertEqual(self.send_plan(pid)[0], 403)
+        self.assertEqual(self.send_plan(pid, allow_loud=True)[0], 404)
+
+    def test_cancelled_plan_is_refused(self):
+        pid = self.make()
+        self.assertEqual(self.cancel(pid), (200, {"plan_id": pid, "discarded": True}))
+        status, out = self.send_plan(pid, allow_loud=True)
+        self.assertEqual((status, out["error"]), (404, "plan_unknown"))
+        self.assertIn("cancelled", out["reason"])
+        # Cancelling again, or an unknown plan, is not an error.
+        self.assertEqual(self.cancel(pid), (200, {"plan_id": pid, "discarded": False}))
+        self.assertEqual(self.send(f"/v1/plans/{pid}/cancel", {"x": 1})[0], 400)
+
+    def test_expires_at_60_s(self):
+        pid = self.make()
+        self.clock[0] += 59.9
+        self.assertEqual(self.send_plan(pid, allow_loud=True)[0], 200)
+        pid = self.make()
+        self.clock[0] += 60
+        status, out = self.send_plan(pid, allow_loud=True)
+        self.assertEqual((status, out["error"]), (410, "plan_expired"))
+        self.assertEqual(self.send_plan(pid, allow_loud=True)[0], 404)
+
+    def test_expiry_is_checked_when_the_frames_would_go(self):
+        # The Send arrives inside the 60 s; the read ends after it.
+        pid = self.make()
+        self.clock[0] += 59.9
+        read = devstate.read_settings
+
+        def slow_read(*a, **kw):
+            self.clock[0] += 0.2
+            return read(*a, **kw)
+
+        with mock.patch.object(devstate, "read_settings", slow_read):
+            status, out = self.send_plan(pid, allow_loud=True)
+        self.assertEqual((status, out["error"]), (410, "plan_expired"))
+        self.assertEqual(self.send_plan(pid, allow_loud=True)[0], 404)
+
+    def test_cancelling_an_expired_plan_discards_nothing(self):
+        pid = self.make()
+        self.clock[0] += 60
+        self.assertEqual(self.cancel(pid), (200, {"plan_id": pid, "discarded": False}))
+
+    def test_two_sends_of_one_plan(self):
+        # The second Send arrives while the first is inside its read.
+        pid = self.make()
+        reading, results = threading.Event(), []
+        read = devstate.read_settings
+
+        def slow_read(*a, **kw):
+            reading.set()
+            time.sleep(0.3)
+            return read(*a, **kw)
+
+        def send():
+            results.append(self.send_plan(pid, allow_loud=True)[0])
+
+        with mock.patch.object(devstate, "read_settings", slow_read):
+            first = threading.Thread(target=send)
+            first.start()
+            self.assertTrue(reading.wait(5))
+            send()
+            first.join()
+        self.assertEqual(results, [404, 200])
+
+    def test_expired_plans_are_pruned(self):
+        self.make()
+        self.clock[0] += 61
+        pid = self.make()
+        self.assertEqual(list(self.agent._plans), [pid])
+
+    def test_a_change_elsewhere_is_409_and_discards_the_plan(self):
+        for rec, value, name in (
+            (13, 1, "highGain"),
+            (9, 20, "volume"),
+            (32, 0, "volumeStep"),
+            (12, 2, "outputType"),
+            (0, 0, "powered"),
+        ):
+            with self.subTest(name=name):
+                pid = self.make()
+                old = self.dac.records[rec]
+                self.dac.records[rec] = value
+                status, out = self.send_plan(pid, allow_loud=True)
+                self.assertEqual((status, out["error"]), (409, "changed"))
+                self.assertEqual(out["changed"], [name])
+                self.assertEqual(out["state"]["status"], "read")
+                self.assertNotIn("frames", out)
+                self.dac.records[rec] = old
+                self.assertEqual(self.send_plan(pid, allow_loud=True)[0], 404)
+        self.assertEqual(self.agent._plans, {})
+        self.assert_no_write_sent()
+
+    def test_409_fresh_state_reports_the_new_value(self):
+        pid = self.make()
+        self.dac.records[9] = 5
+        status, out = self.send_plan(pid, allow_loud=True)
+        self.assertEqual(out["state"]["fields"]["volume_db"]["value"], -5.0)
+        self.assertEqual(out["before"]["volume"]["db"], -5.0)
+
+    def test_sample_rate_alone_is_ignored(self):
+        pid = self.make()
+        self.dac.records[31] = 96000
+        self.dac.records[40] = 3  # some other field nobody depends on
+        self.assertEqual(self.send_plan(pid, allow_loud=True)[0], 200)
+
+    def test_a_dac_that_disappears(self):
+        pid = self.make()
+        with mock.patch.object(toppingctl.hid, "enumerate", _enumerate()):
+            status, out = self.send_plan(pid, allow_loud=True)
+        self.assertEqual((status, out["error"]), (503, "unavailable"))
+        self.assertEqual(self.send_plan(pid, allow_loud=True)[0], 404)
+
+    def test_busy_at_send_is_423(self):
+        pid = self.make()
+        self.agent._hid.acquire()
+        try:
+            status, out = self.send_plan(pid, allow_loud=True)
+        finally:
+            self.agent._hid.release()
+        self.assertEqual((status, out["error"]), (423, "busy"))
+
+    def test_a_model_unconfirmed_by_send_time_is_refused(self):
+        pid = self.make()
+        with mock.patch.dict(toppingctl.CONFIRMED_WRITES, {"dx5ii": frozenset()}):
+            status, out = self.send_plan(pid, allow_loud=True)
+        self.assertEqual((status, out["error"]), (403, "model_unverified"))
+
+    def test_bad_send_bodies_dont_use_the_plan(self):
+        pid = self.make()
+        for body in ({"allow_loud": "yes"}, {"allow_loud": 1}, {"frames": []}, []):
+            with self.subTest(body=body):
+                self.assertEqual(self.send(f"/v1/plans/{pid}/send", body)[0], 400)
+        self.assertEqual(self.send_plan(pid, allow_loud=True)[0], 200)
+
+    def test_routes_and_methods(self):
+        pid = self.make()
+        for method, path in (
+            ("GET", "/v1/plans"),
+            ("GET", f"/v1/plans/{pid}/send"),
+            ("DELETE", f"/v1/plans/{pid}/cancel"),
+            ("POST", f"/v1/plans/{pid}"),
+            ("POST", f"/v1/plans/{pid}/frames"),
+            ("POST", "/v1/plans/short/send"),
+        ):
+            with self.subTest(method=method, path=path):
+                status, *_ = self.call(path, method=method, body=b"{}")
+                self.assertIn(status, (404, 405))
+        self.assertIn(pid, self.agent._plans)
+
+    def test_plans_are_lost_on_restart(self):
+        pid = self.make()
+        self.server.RequestHandlerClass.agent = toppingd.Agent(
+            "office", "auto", self.state_dir, now=lambda: self.clock[0]
+        )
+        self.assertEqual(self.send_plan(pid, allow_loud=True)[0], 404)
+
+
+class PlanModelTest(PlanTestCase):
+    """gain.set only on a confirmed model; ops not in this build on none."""
+
+    def setUp(self):
+        super().setUp()
+        self.start()
+
+    def attached(self, *products):
+        return mock.patch.object(toppingctl.hid, "enumerate", _enumerate(*products))
+
+    def check_refused(self, error, http=403, **body):
+        body = body or {"op": "gain.set", "args": {"on": True}}
+        body.setdefault("expected", {"gain": "low"})
+        status, out = self.send("/v1/plans", body)
+        self.assertEqual((status, out["error"]), (http, error))
+        self.assertNotIn("frames", out)
+        self.assertEqual((self.dac.writes, self.dac.opens, self.agent._plans), ([], 0, {}))
+        return out
+
+    def test_unconfirmed_models_and_no_model_are_refused(self):
+        for products, error, code in (
+            (("DX1 II",), "model_unverified", 403),
+            (("D90 III Discrete",), "model_unverified", 403),
+            ((), "unavailable", 503),
+            (("D50s",), "unavailable", 503),
+            (("DX5 II", "DX1 II"), "unavailable", 503),
+        ):
+            for on in (True, False):
+                with self.subTest(products=products, on=on), self.attached(*products):
+                    out = self.check_refused(error, code, op="gain.set", args={"on": on})
+                    if error == "model_unverified":
+                        self.assertIn("unverified", out["reason"])
+
+    def test_emptied_confirmed_writes_refuse(self):
+        with mock.patch.dict(toppingctl.CONFIRMED_WRITES, {"dx5ii": frozenset()}):
+            self.check_refused("model_unverified")
+        self.assertFalse(toppingd.gain_writable("dx1ii"))
+        self.assertTrue(toppingd.gain_writable("dx5ii"))
+
+    def test_ops_not_in_this_build_are_refused_on_every_model(self):
+        ops = sorted(toppingd.OPS_NOT_IN_BUILD)
+        self.assertTrue({"power.set", "scene.recall", "preset.apply", "preset.flat"} <= set(ops))
+        for products in (("DX5 II",), ("DX1 II",), ("D90 III Discrete",), (), ("D50s",)):
+            with self.attached(*products):
+                for op in ops:
+                    with self.subTest(products=products, op=op):
+                        out = self.check_refused("op_unavailable", op=op, args={"on": True})
+                        self.assertIn(op.split(".")[0], out["reason"])
+                for op in ("volume.set", "raw.write", "probe", "factory.reset", ""):
+                    with self.subTest(products=products, op=op):
+                        self.check_refused("bad_request", http=400, op=op, args={})
 
 
 class ReadOnlyHandleTest(unittest.TestCase):
