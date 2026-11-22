@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """toppingd -- the per-host agent behind the toppingctl web UI. Dry-run only.
 
-Plan: docs/plans/2026-10-26-web-ui-architecture-plan.md, build steps 2 and 4
-(the agent half of step 4, in dry-run). This build sends no writes at all:
-its only mode is dry-run, the volume route returns the frames it would send
-and sends nothing, and its handle wrapper refuses any frame that is not a
-readNack in CONFIRMED_READS for the model.
+Plan: docs/plans/2026-10-26-web-ui-architecture-plan.md, build steps 2 and 4,
+and the agent half of step 5's gain (4 and 5 in dry-run). This build sends no
+writes at all: its only mode is dry-run, the volume route and a plan's Send
+return the frames they would send and send nothing, and its handle wrapper
+refuses any frame that is not a readNack in CONFIRMED_READS for the model.
 
     GET /v1/room             identity: host, room, DAC, read path, mode, and
                              whether the device lock file can be opened
@@ -20,6 +20,19 @@ readNack in CONFIRMED_READS for the model.
                              the fresh read is louder than the target
     POST /v1/unlocks         {} -> {unlock_id, expires_at}: 60 s above -10 dB
     DELETE /v1/unlocks/{id}  discards an unlock
+    POST /v1/plans           {op, args, expected?}: reads the device, builds
+                             and checks the frames, and returns {plan_id,
+                             summary, before, after_predicted, frames,
+                             needs_unlock, expires_at}. Only op gain.set,
+                             args {on: bool}, exists; gain on needs_unlock
+    POST /v1/plans/{id}/send {allow_loud?}: re-reads; 409 changed if power,
+                             volume, volumeStep, gain or output moved since
+                             the plan; gain on needs allow_loud: true. Returns
+                             the planned frames, sent: false
+    POST /v1/plans/{id}/cancel  {}: discards the plan
+
+A plan is single-use: Send (whatever its outcome), Cancel, a 409, or 60 s
+after it was made each discard it. Plans live in memory only.
 
 Undo is a volume write: POST /v1/volume with the undo token's target_db and
 expected_db (the plan's "Undo of a volume change is a volume write").
@@ -87,12 +100,13 @@ from toppingctl import (
     dx1_raw_to_db,
     find_devices,
     open_checked,
+    plan_gain,
     plan_volume,
     volume_steps,
 )
 from vendor_commands import COMMANDS, ENUMS, FIELD_ENUM, SETTINGS_FIELDS
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 PROG = "toppingd"
 
 DEFAULT_CONFIG = "/etc/toppingd/toppingd.yaml"
@@ -110,7 +124,34 @@ VOLUME_KEYS = {"target_db", "expected_db", "unlock_id", "lower_if_louder"}
 # The frames a volume write is: 71 02 and the commit.
 VOLUME_WRITES = frozenset([(REG_CTRL, SUB_VOLUME), (REG_CTRL, SUB_COMMIT)])
 # GetSettings record indexes (vendor_commands.SETTINGS_FIELDS).
-REC_VOLUME, REC_VOLUME_STEP = 9, 32
+REC_POWERED, REC_VOLUME, REC_OUTPUT, REC_GAIN, REC_VOLUME_STEP = 0, 9, 12, 13, 32
+
+# Plans: single-use, and gone 60 s after they are made (the plan's "The
+# unlock lasts 60 s", its plan half). Memory only, like unlocks (Q6).
+PLAN_SECS = 60
+PLAN_ROUTE = re.compile(r"/v1/plans/([A-Za-z0-9_-]{16,64})/(send|cancel)")
+PLAN_KEYS = {"op", "args", "expected"}
+PLAN_OPS = {"gain.set"}
+# The ops the plan names that this build doesn't have, and why, in words
+# the UI can show as they are.
+OPS_NOT_IN_BUILD = {
+    "power.set": "power.set is not in this build: sleep and wake wait for the asleep-state "
+    "measurement (plan step 6)",
+    "scene.recall": "scene.recall is out of the web build (Q15): 71 11 and 71 12 aren't "
+    "confirmed on the front panel",
+    "input.set": "input is read-only until a hardware check confirms its write (decision 1)",
+    "output.set": "output is read-only until a hardware check confirms its write (decision 1)",
+    "mute.set": "mute is read-only until a hardware check confirms its write (decision 1)",
+    "preset.apply": "preset.apply is not in this build: where the agent loads a preset from "
+    "is still an open question",
+    "preset.flat": "preset.flat is not in this build: it lands with preset.apply",
+}
+# The GetSettings records every plan depends on: if one moves between the
+# plan and its Send, the Send is a 409 (the plan's /v1/plans/{id}/send row).
+# Volume is in for every op, for the presets' preamp-rise rule. Anything
+# else, sampleRate for one, changes with playback and is ignored.
+PLAN_DEPENDS = (REC_POWERED, REC_VOLUME, REC_OUTPUT, REC_GAIN, REC_VOLUME_STEP)
+EXPECTED_KEYS = {"power", "volume_db", "gain", "output"}
 
 # The plan's waits: the agent gives up on the device lock after 2 s and
 # answers 423, well inside toppingweb's 10 s response timeout.
@@ -337,6 +378,20 @@ def volume_writable(key):
     )
 
 
+def gain_writable(key):
+    """Whether gain.set may be planned for this model: confirmed, read
+    through GetSettings (the plan's before comes from it), and with every
+    frame toppingctl.plan_gain builds, on and off, in CONFIRMED_WRITES.
+    Today only the DX5 II."""
+    spec = DEVICES.get(key) or {}
+    regs = {f.reg_sub for on in (True, False) for f in plan_gain(spec, on)}
+    return (
+        spec.get("status") == "confirmed"
+        and read_path(key) == "get_settings"
+        and regs <= CONFIRMED_WRITES.get(key, frozenset())
+    )
+
+
 def check_agent_writes(key, frames):
     """The agent's write gate, on every model whatever its status: the NEVER
     set first, then only write frames in CONFIRMED_WRITES. In dry-run these
@@ -552,6 +607,61 @@ def _level(raw, step):
     return {"db": -raw * step + 0.0, "raw": raw, "volume_step_db": step}
 
 
+def _frames_json(frames):
+    return [{"hex": f.data.hex(" "), "label": f.label} for f in frames]
+
+
+def _plan_before(rec):
+    """The fields a plan depends on, from a GetSettings read, or a reason
+    string when the read can't anchor a plan."""
+    missing = [SETTINGS_FIELDS[i] for i in PLAN_DEPENDS if i not in rec]
+    if missing:
+        return f"{', '.join(missing)} not in the read; nothing to anchor the plan on"
+    step = 1.0 if rec[REC_VOLUME_STEP] == 1 else 0.5
+    out = rec[REC_OUTPUT]
+    return {
+        "power": "on" if rec[REC_POWERED] else "off",
+        "volume": _level(rec[REC_VOLUME], step),
+        "gain": "high" if rec[REC_GAIN] else "low",
+        "output": ENUMS[FIELD_ENUM["outputType"]].get(out, f"?{out}"),
+    }
+
+
+def _expected(value):
+    """A plan's optional `expected`: the fields the UI showed, in /v1/state's
+    vocabulary, which the plan's read must match."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise BadRequest("expected must be an object of the fields the UI showed")
+    extra = set(value) - EXPECTED_KEYS
+    if extra:
+        raise BadRequest(
+            f"expected: unknown keys {', '.join(sorted(extra))}; "
+            f"it takes {', '.join(sorted(EXPECTED_KEYS))}"
+        )
+    for name, v in value.items():
+        if name == "volume_db":
+            _number(value, name)
+        elif not isinstance(v, str):
+            raise BadRequest(f"expected.{name} must be a string, as /v1/state reports it")
+    return value
+
+
+def _expected_problem(expected, before):
+    """None if every expected field matches the read, else the reason. The
+    volume is compared in raw units, as /v1/volume compares expected_db."""
+    for name, want in sorted(expected.items()):
+        if name == "volume_db":
+            level = before["volume"]
+            raw, on_grid = volume_steps(want, level["volume_step_db"])
+            if on_grid != want or raw != level["raw"]:
+                return f"the device reads {level['db']:+.1f} dB, not the {want:+.1f} dB expected"
+        elif before[name] != want:
+            return f"the device reads {name} {before[name]}, not the {want} expected"
+    return None
+
+
 class Agent:
     def __init__(
         self,
@@ -574,6 +684,9 @@ class Agent:
         # drops every unlock, which is safe (plan Q6).
         self._unlocks = {}
         self._unlocks_mu = threading.Lock()
+        # plan_id -> plan, likewise memory only (Q6).
+        self._plans = {}
+        self._plans_mu = threading.Lock()
 
     def room_info(self):
         dac = identify(self.configured_device)
@@ -787,6 +900,216 @@ class Agent:
             "undo": {"target_db": before["db"], "expected_db": after["db"]},
         }
 
+    # --- plans ----------------------------------------------------------------
+
+    def create_plan(self, body):
+        """POST /v1/plans {op, args, expected?}: the first phase of every write
+        but volume. The op is checked before anything is opened, so an op not
+        in this build is refused on every model. Then the device is read and
+        the frames built and checked under one lock and open. Sends nothing."""
+        if not isinstance(body, dict):
+            raise BadRequest("the body must be a JSON object")
+        extra = set(body) - PLAN_KEYS
+        if extra:
+            raise BadRequest(
+                f"unknown keys {', '.join(sorted(extra))}: a plan takes op, args, expected"
+            )
+        op = body.get("op")
+        if not isinstance(op, str):
+            raise BadRequest("op must name an operation, such as gain.set")
+        if op in OPS_NOT_IN_BUILD:
+            return 403, {"error": "op_unavailable", "op": op, "reason": OPS_NOT_IN_BUILD[op]}
+        if op not in PLAN_OPS:
+            raise BadRequest(f"unknown op {op!r}: this build plans {', '.join(sorted(PLAN_OPS))}")
+        args = body.get("args")
+        if not (isinstance(args, dict) and set(args) == {"on"} and isinstance(args["on"], bool)):
+            raise BadRequest('gain.set takes args {"on": true} or {"on": false}')
+        expected = _expected(body.get("expected"))
+        on = args["on"]
+        dac, key, refused = self._plan_target()
+        if refused:
+            return refused
+        spec = DEVICES[key]
+        status, st, decided = self._read(
+            dac, then=lambda rec: self._gain_plan(spec, key, rec, on, expected)
+        )
+        return self._plan_result(status, st, decided)
+
+    def _plan_target(self):
+        """(dac, key, None) for a model gain.set may be planned on, else
+        (dac, None, the refusal). Enumeration only: nothing is opened."""
+        dac = identify(self.configured_device)
+        key = dac.get("key") if dac["status"] == "found" else None
+        if key is None:
+            return dac, None, (503, {"error": "unavailable", "status": dac["status"], "dac": dac})
+        if not gain_writable(key):
+            return (
+                dac,
+                None,
+                (
+                    403,
+                    {
+                        "error": "model_unverified",
+                        "reason": (
+                            f"{DEVICES[key]['name']} is {DEVICES[key]['status']}: this agent "
+                            "plans gain only on a model confirmed on hardware, and no setting "
+                            "changes that"
+                        ),
+                    },
+                ),
+            )
+        return dac, key, None
+
+    @staticmethod
+    def _plan_result(status, st, decided):
+        if decided is None:  # the read failed or the device was busy
+            return (status if status != 200 else 503), {
+                "error": st["status"],
+                "reason": st.get("error") or st["fields"]["gain"].get("reason"),
+                "state": st,
+            }
+        status, obj = decided
+        if status in (409, 503):  # changed elsewhere, or a read that can't anchor a plan
+            obj["state"] = st
+        return status, obj
+
+    def _gain_plan(self, spec, key, rec, on, expected):
+        """Plan gain.set from the read just taken: the frames come from
+        toppingctl.plan_gain, as the CLI's gain builds them, and pass the
+        agent's write gate before they are shown."""
+        before = _plan_before(rec)
+        if isinstance(before, str):
+            return 503, {"error": "read_failed", "reason": before}
+        problem = _expected_problem(expected, before)
+        if problem:
+            return 409, {"error": "changed", "reason": problem, "before": before}
+        frames = plan_gain(spec, on)
+        try:
+            check_agent_writes(key, frames)
+        except Refused as e:
+            return 403, {"error": "refused", "reason": str(e), "before": before}
+        after = {**before, "gain": "high" if on else "low"}
+        now = self.now()
+        pid = secrets.token_urlsafe(24)
+        with self._plans_mu:
+            self._plans = {p: v for p, v in self._plans.items() if v["expires"] > now}
+            self._plans[pid] = {
+                "op": "gain.set",
+                "args": {"on": on},
+                "key": key,
+                # The raw records the Send's re-read must match.
+                "anchor": {i: rec[i] for i in PLAN_DEPENDS},
+                "after_predicted": after,
+                "frames": frames,
+                # Decision 8: high gain is treated like the unlock.
+                "needs_unlock": on,
+                "expires": now + PLAN_SECS,
+            }
+        summary = f"gain {before['gain']} to {after['gain']}"
+        if before["gain"] == after["gain"]:
+            summary += " (no change: the device already reads it)"
+        return 200, {
+            "mode": self.mode,
+            "plan_id": pid,
+            "op": "gain.set",
+            "args": {"on": on},
+            "summary": summary,
+            "before": before,
+            "after_predicted": after,
+            "frames": _frames_json(frames),
+            "needs_unlock": on,
+            "expires_at": _iso(now + PLAN_SECS),
+            "expires_in_s": PLAN_SECS,
+        }
+
+    def _take_plan(self, pid):
+        """Remove and return the plan, or (None, the refusal). Taking it
+        first is what makes a plan single-use: whatever this Send's outcome,
+        a second Send finds nothing."""
+        with self._plans_mu:
+            plan = self._plans.pop(pid, None)
+        if plan is None:
+            return None, (
+                404,
+                {
+                    "error": "plan_unknown",
+                    "reason": "the plan is unknown, cancelled, already sent, or was "
+                    "discarded by a 409; make a new one",
+                },
+            )
+        if self.now() >= plan["expires"]:
+            return None, (
+                410,
+                {
+                    "error": "plan_expired",
+                    "reason": f"the plan expired ({PLAN_SECS} s); make a new one",
+                },
+            )
+        return plan, None
+
+    def send_plan(self, pid, body):
+        """POST /v1/plans/{id}/send {allow_loud?}. Re-reads, and refuses with
+        409 if a field the op depends on moved since the plan. Dry-run: the
+        planned frames come back with sent: false, as /v1/volume does."""
+        if not isinstance(body, dict) or set(body) - {"allow_loud"}:
+            raise BadRequest('Send takes {} or {"allow_loud": true}')
+        allow_loud = body.get("allow_loud", False)
+        if not isinstance(allow_loud, bool):
+            raise BadRequest("allow_loud must be true or false")
+        plan, refused = self._take_plan(pid)
+        if refused:
+            return refused
+        if plan["needs_unlock"] and not allow_loud:
+            return 403, {
+                "error": "unlock_required",
+                "reason": "switching gain to high is treated like a volume above "
+                f"{VOL_WARN_DB:+.0f} dB: Send needs allow_loud: true. The plan is discarded",
+            }
+        dac, key, refused = self._plan_target()
+        if refused:
+            return refused
+        if key != plan["key"]:
+            return 409, {
+                "error": "changed",
+                "reason": f"a {DEVICES[key]['name']} is attached, not the DAC this plan read",
+            }
+        status, st, decided = self._read(dac, then=lambda rec: self._send_decision(pid, plan, rec))
+        return self._plan_result(status, st, decided)
+
+    def _send_decision(self, pid, plan, rec):
+        before = _plan_before(rec)
+        if isinstance(before, str):
+            return 503, {"error": "read_failed", "reason": before}
+        moved = [SETTINGS_FIELDS[i] for i in PLAN_DEPENDS if rec[i] != plan["anchor"][i]]
+        if moved:
+            return 409, {
+                "error": "changed",
+                "reason": f"changed since the plan: {', '.join(moved)}. The plan is discarded",
+                "before": before,
+                "changed": moved,
+            }
+        try:
+            check_agent_writes(plan["key"], plan["frames"])
+        except Refused as e:
+            return 403, {"error": "refused", "reason": str(e), "before": before}
+        return 200, {
+            "mode": self.mode,
+            "sent": False,
+            "plan_id": pid,
+            "op": plan["op"],
+            "args": plan["args"],
+            "before": before,
+            "after_predicted": plan["after_predicted"],
+            "frames": _frames_json(plan["frames"]),
+        }
+
+    def cancel_plan(self, pid):
+        """POST /v1/plans/{id}/cancel. Cancelling an unknown or expired plan
+        is not an error, as with unlocks."""
+        with self._plans_mu:
+            found = self._plans.pop(pid, None) is not None
+        return 200, {"plan_id": pid, "discarded": found}
+
     def _base(self, dac, status, **extra):
         written, wat = read_written(self.state_dir) if dac.get("key") else ({}, None)
         fields = {name: _unknown(extra.pop("reason", NO_READ_REASON)) for name in FIELDS}
@@ -970,15 +1293,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._send(e.status, {"error": error, "reason": e.reason})
         url = urlsplit(self.path)
         prefix = "/v1/unlocks/"
+        plan = PLAN_ROUTE.fullmatch(url.path)
         if url.path.startswith(prefix) and UNLOCK_ID.fullmatch(url.path[len(prefix) :]):
             uid = url.path[len(prefix) :]
             methods = {"DELETE": lambda q, b: self.agent.discard_unlock(uid)}
+        elif plan and plan[2] == "send":
+            methods = {"POST": lambda q, b: self.agent.send_plan(plan[1], _json(b))}
+        elif plan:
+            methods = {"POST": lambda q, b: self._cancel(plan[1], b)}
         else:
             methods = {
                 "/v1/room": {"GET": self._room},
                 "/v1/state": {"GET": self._state},
                 "/v1/volume": {"POST": lambda q, b: self.agent.volume(_json(b))},
                 "/v1/unlocks": {"POST": self._unlock},
+                "/v1/plans": {"POST": lambda q, b: self.agent.create_plan(_json(b))},
             }.get(url.path)
         if methods is None:
             return self._send(404, {"error": "not_found"}, nonce)
@@ -1007,6 +1336,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if _json(body) != {}:
             raise BadRequest("POST /v1/unlocks takes {}")
         return self.agent.create_unlock()
+
+    def _cancel(self, pid, body):
+        if _json(body) != {}:
+            raise BadRequest("POST /v1/plans/{id}/cancel takes {}")
+        return self.agent.cancel_plan(pid)
 
     do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = _handle
 
