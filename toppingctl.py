@@ -202,10 +202,10 @@ DEVICES = {
         # DX1_VENDOR_READ_SAFE -- and not even for all of those: 0x7900,
         # 0x7d00 and 0x810b write on hardware too (DX1_READ_WRITES, #32, #43),
         # so they are never read, and neither is 0x810c (DX1_VENDOR_UNREAD,
-        # untested, never read by the vendor app). 0x1106, the 3-slot PEQ dump, is also queried
-        # (DX1_REG_PEQ_DUMP, see devstate.dx1_query) but is NOT on that vendor
-        # list -- it rests on one contributor's unmeasured claim, not a
-        # recorded hardware test. See devstate.dx1_query's docstring before
+        # untested, never read by the vendor app). 0x1106, the 3-slot PEQ
+        # dump, is also queried (DX1_REG_PEQ_DUMP, see devstate.dx1_query)
+        # but is NOT on that vendor list -- it rests on one contributor's
+        # unmeasured claim, not a recorded hardware test. See devstate.dx1_query's docstring before
         # trusting it. For anything else -- gain, filter,
         # brightness, input, display mode among them -- the device treats the
         # incoming readNack as a WRITE of the data field: probing with

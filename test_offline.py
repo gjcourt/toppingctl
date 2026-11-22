@@ -290,6 +290,12 @@ class Dx1SceneRecallTest(unittest.TestCase):
     connectState, never a readNack, which writes on this model -- and what it
     set is read from what the device pushes after it."""
 
+    def test_balance_pushes_keep_their_names(self):
+        # #43 took 81 0b / 81 0c out of DX1_STATE_QUERIES, which this map is
+        # built from; a recall's push can still carry them.
+        names = self.scenes.DX1_SINGLE_NAMES
+        self.assertEqual((names[0x810B], names[0x810C]), ("analogBalance", "optBalance"))
+
     def setUp(self):
         import scenes
 

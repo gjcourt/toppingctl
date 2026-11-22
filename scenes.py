@@ -72,6 +72,9 @@ DX1_SINGLE_NAMES.update(
         (DX1_REG_FILTER[0] << 8) | DX1_REG_FILTER[1]: "filter",
         (DX1_REG_HIGH_GAIN[0] << 8) | DX1_REG_HIGH_GAIN[1]: "highGain",
         (DX1_REG_INPUT[0] << 8) | DX1_REG_INPUT[1]: "input",
+        # Never read (#43), so not in DX1_STATE_QUERIES, but a push can carry them.
+        0x810B: "analogBalance",
+        0x810C: "optBalance",
     }
 )
 DX1_VOLUME_FRAMES = {
