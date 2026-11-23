@@ -746,6 +746,77 @@ class Dx1ReadSafeListTest(unittest.TestCase):
         self.assertEqual(writes, [])
 
 
+class ListenDx1ReadGateTest(unittest.TestCase):
+    """TOPPINGCTL-17: listen.py --read on the DX1 II sends a readNack only in
+    CONFIRMED_READS. It used to check the NEVER names only, so --read 0x810b
+    reset the analog balance (#43)."""
+
+    def setUp(self):
+        # listen.open_checked is replaced per run; any other route to the
+        # hardware fails the test instead of sending.
+        patches = [
+            mock.patch.object(
+                toppingctl.hid, "Device", side_effect=AssertionError("opened hardware")
+            ),
+            mock.patch.object(
+                toppingctl.hid, "enumerate", side_effect=AssertionError("enumerated hardware")
+            ),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        self.writes, self.opened = [], []
+
+    def run_listen(self, device, read):
+        import listen
+
+        def open_(key):
+            self.opened.append(key)
+            return _make_fake_hid(self.writes)()
+
+        args = argparse.Namespace(read=read, secs=0, raw=False, device=device)
+        with mock.patch.object(listen, "open_checked", open_):
+            run_quietly(listen.listen, args)
+        return self.writes, self.opened
+
+    def refusal(self, device, read):
+        with self.assertRaises(SystemExit) as cm:
+            self.run_listen(device, read)
+        return str(cm.exception.code)
+
+    def test_a_refusal_writes_nothing_and_opens_nothing(self):
+        # The four on the vendor list, plus high gain (the register a "read"
+        # sweep once reset) and the unconfirmed PEQ dump.
+        for read in ("0x810b", "0x810c", "0x7900", "0x7d00", "0x7500", "0x1106"):
+            with self.subTest(read=read):
+                self.assertIn("refusing a dx1ii readNack", self.refusal("dx1ii", read))
+        self.assertEqual(self.writes, [])
+        self.assertEqual(self.opened, [])
+
+    def test_the_reason_names_the_measurement(self):
+        import listen
+
+        self.assertIn("#43", listen.refuse_dx1("dx1ii", 0x81, 0x0B))
+        self.assertIn("untested", listen.refuse_dx1("dx1ii", 0x81, 0x0C))
+        self.assertIn("#32", listen.refuse_dx1("dx1ii", 0x79, 0x00))
+        self.assertIn("not in CONFIRMED_READS", listen.refuse_dx1("dx1ii", 0x75, 0x00))
+
+    def test_every_confirmed_read_is_still_sent(self):
+        for reg, sub in sorted(toppingctl.CONFIRMED_READS["dx1ii"]):
+            self.writes.clear()
+            self.opened.clear()
+            with self.subTest(reg=f"{reg:02x} {sub:02x}"):
+                writes, opened = self.run_listen("dx1ii", f"0x{reg:02x}{sub:02x}")
+                self.assertEqual(opened, ["dx1ii"])
+                self.assertEqual(writes, [toppingctl.frame(reg, sub, 0, opcode=0x10)])
+
+    def test_other_models_keep_their_behaviour(self):
+        # Not dx1-protocol: CONFIRMED_READS is not applied, NEVER still is.
+        writes, _ = self.run_listen("dx5ii", "GetSettings")
+        self.assertEqual(writes, [toppingctl.frame(0x71, 0x0C, 0, opcode=0x10)])
+        self.assertIn("refusing to address FactoryReset", self.refusal("dx5ii", "FactoryReset"))
+
+
 def _vendor_reg(name):
     """(reg, sub) for a vendor command name, via vendor_commands."""
     from vendor_commands import COMMANDS
